@@ -1,6 +1,6 @@
 import numpy as np
-from django.db.models import Q
 from apps.fuel.models import FuelPrice
+
 
 class FuelService:
     @staticmethod
@@ -10,20 +10,25 @@ class FuelService:
         Supports numpy broadcasting.
         """
         R = 3958.8  # Earth's radius in miles
-        
+
         # Convert degrees to radians
         lats1, lons1, lats2, lons2 = map(np.radians, [lats1, lons1, lats2, lons2])
-        
+
         dlat = lats2 - lats1
         dlon = lons2 - lons1
-        
-        a = np.sin(dlat / 2.0)**2 + np.cos(lats1) * np.cos(lats2) * np.sin(dlon / 2.0)**2
+
+        a = (
+            np.sin(dlat / 2.0) ** 2
+            + np.cos(lats1) * np.cos(lats2) * np.sin(dlon / 2.0) ** 2
+        )
         c = 2.0 * np.arcsin(np.sqrt(a))
-        
+
         return R * c
 
     @classmethod
-    def get_stations_near_route(cls, route_coords: list[tuple[float, float]], max_distance_miles: float = 15.0) -> list[dict]:
+    def get_stations_near_route(
+        cls, route_coords: list[tuple[float, float]], max_distance_miles: float = 15.0
+    ) -> list[dict]:
         """
         Given a list of (latitude, longitude) route coordinates:
         1. Queries stations in the database within the expanded route bounding box.
@@ -39,18 +44,17 @@ class FuelService:
 
         # 1. Compute bounding box and query candidates from database
         # 15 miles ~ 0.25 degrees of latitude/longitude as an approximation
-        margin = max_distance_miles / 69.0 # 69 miles per degree of latitude
+        margin = max_distance_miles / 69.0  # 69 miles per degree of latitude
         min_lat = float(np.min(route_lats)) - margin
         max_lat = float(np.max(route_lats)) + margin
-        
+
         # Longitude degrees shrink as we go north. At US average latitude (38 degrees), 1 degree is ~55 miles.
         margin_lon = max_distance_miles / 55.0
         min_lon = float(np.min(route_lons)) - margin_lon
         max_lon = float(np.max(route_lons)) + margin_lon
 
         stations_qs = FuelPrice.objects.filter(
-            latitude__range=(min_lat, max_lat),
-            longitude__range=(min_lon, max_lon)
+            latitude__range=(min_lat, max_lat), longitude__range=(min_lon, max_lon)
         )
 
         if not stations_qs.exists():
@@ -63,8 +67,7 @@ class FuelService:
 
         # 2. Compute cumulative distances along the route (mile markers)
         seg_dists = cls.haversine_distance_vectorized(
-            route_lats[:-1], route_lons[:-1],
-            route_lats[1:], route_lons[1:]
+            route_lats[:-1], route_lons[:-1], route_lats[1:], route_lons[1:]
         )
         route_cum_dists = np.zeros(len(route_coords), dtype=np.float64)
         route_cum_dists[1:] = np.cumsum(seg_dists)
@@ -73,8 +76,10 @@ class FuelService:
         # Shape: (num_stations, num_route_points)
         # Using numpy broadcasting to compute pairwise distances
         dists = cls.haversine_distance_vectorized(
-            station_lats[:, np.newaxis], station_lons[:, np.newaxis],
-            route_lats, route_lons
+            station_lats[:, np.newaxis],
+            station_lons[:, np.newaxis],
+            route_lats,
+            route_lons,
         )
 
         # Find the index of the closest route point for each station
@@ -89,19 +94,23 @@ class FuelService:
         for idx, station in enumerate(stations):
             dist_to_route = min_dists[idx]
             if dist_to_route <= max_distance_miles:
-                nearby_stations.append({
-                    "id": str(station.id),
-                    "opis_truckstop_id": station.opis_truckstop_id,
-                    "name": station.truckstop_name,
-                    "address": station.address,
-                    "city": station.city,
-                    "state": station.state,
-                    "price": float(station.retail_price),
-                    "latitude": station.latitude,
-                    "longitude": station.longitude,
-                    "dist_to_route": float(dist_to_route),
-                    "dist": float(station_cum_dists[idx])  # Cumulative distance (mile marker) along the route
-                })
+                nearby_stations.append(
+                    {
+                        "id": str(station.id),
+                        "opis_truckstop_id": station.opis_truckstop_id,
+                        "name": station.truckstop_name,
+                        "address": station.address,
+                        "city": station.city,
+                        "state": station.state,
+                        "price": float(station.retail_price),
+                        "latitude": station.latitude,
+                        "longitude": station.longitude,
+                        "dist_to_route": float(dist_to_route),
+                        "dist": float(
+                            station_cum_dists[idx]
+                        ),  # Cumulative distance (mile marker) along the route
+                    }
+                )
 
         # Sort stations by cumulative distance along the route (mile marker)
         nearby_stations.sort(key=lambda x: x["dist"])

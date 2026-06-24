@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 
+
 class FuelPrice(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     opis_truckstop_id = models.IntegerField(unique=True)
@@ -16,7 +17,9 @@ class FuelPrice(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'fuel_prices'
+        db_table = "fuel_prices"
 
     def __str__(self):
-        return f"{self.truckstop_name} - {self.city}, {self.state} (${self.retail_price})"
+        return (
+            f"{self.truckstop_name} - {self.city}, {self.state} (${self.retail_price})"
+        )

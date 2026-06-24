@@ -1,9 +1,9 @@
 import os
 import tempfile
-import pandas as pd
 import pytest
 from django.core.management import call_command
 from apps.fuel.models import FuelPrice
+
 
 @pytest.mark.django_db
 def test_import_fuel_prices_command():
@@ -11,7 +11,7 @@ def test_import_fuel_prices_command():
     csv_data = (
         "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
         "999901,TEST STATION A,123 Main St,Big Cabin,OK,307,3.109\n"
-        "999901,TEST STATION A DUPE,123 Main St,Big Cabin,OK,307,2.909\n" # Duplicated ID with lower price
+        "999901,TEST STATION A DUPE,123 Main St,Big Cabin,OK,307,2.909\n"  # Duplicated ID with lower price
         "999902,TEST STATION B,456 Highway,Tomah,WI,420,3.509\n"
     )
 

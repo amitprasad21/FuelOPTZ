@@ -1,10 +1,10 @@
 import os
 import logging
 import requests
-from django.conf import settings
 from apps.routing.models import RouteCache
 
 logger = logging.getLogger(__name__)
+
 
 class RoutingService:
     @staticmethod
@@ -15,16 +15,12 @@ class RoutingService:
         """
         query_clean = query.strip()
         ors_key = os.environ.get("ORS_API_KEY")
-        
+
         # 1. Try OpenRouteService Geocoding
         if ors_key:
             try:
                 url = "https://api.openrouteservice.org/v1/geocode/search"
-                params = {
-                    "text": query_clean,
-                    "api_key": ors_key,
-                    "size": 1
-                }
+                params = {"text": query_clean, "api_key": ors_key, "size": 1}
                 r = requests.get(url, params=params, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
@@ -42,11 +38,7 @@ class RoutingService:
         try:
             url = "https://nominatim.openstreetmap.org/search"
             headers = {"User-Agent": "FuelOPTZ-Routing/1.0 (antigravity@gemini)"}
-            params = {
-                "q": query_clean,
-                "format": "json",
-                "limit": 1
-            }
+            params = {"q": query_clean, "format": "json", "limit": 1}
             r = requests.get(url, params=params, headers=headers, timeout=10)
             if r.status_code == 200:
                 data = r.json()
@@ -70,15 +62,16 @@ class RoutingService:
 
         # 1. Check Cache
         cached_route = RouteCache.objects.filter(
-            start_query=start_clean, 
-            destination_query=dest_clean
+            start_query=start_clean, destination_query=dest_clean
         ).first()
 
         if cached_route:
             logger.info(f"Route Cache HIT: {start_clean} to {dest_clean}")
             return cached_route
 
-        logger.info(f"Route Cache MISS: {start_clean} to {dest_clean}. Fetching from routing API...")
+        logger.info(
+            f"Route Cache MISS: {start_clean} to {dest_clean}. Fetching from routing API..."
+        )
 
         # 2. Geocode start and destination queries
         start_lat, start_lon = cls.geocode_query(start_query)
@@ -87,26 +80,29 @@ class RoutingService:
         # 3. Call OpenRouteService Directions API (GeoJSON endpoint)
         ors_key = os.environ.get("ORS_API_KEY")
         if not ors_key:
-            raise ValueError("OpenRouteService API key (ORS_API_KEY) is missing in environment.")
+            raise ValueError(
+                "OpenRouteService API key (ORS_API_KEY) is missing in environment."
+            )
 
         url = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
-        headers = {
-            "Authorization": ors_key,
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": ors_key, "Content-Type": "application/json"}
         # ORS coordinates are passed as [longitude, latitude]
         body = {
             "coordinates": [[start_lon, start_lat], [dest_lon, dest_lat]],
             "geometry": True,
-            "units": "mi"  # request distance in miles
+            "units": "mi",  # request distance in miles
         }
 
         try:
             r = requests.post(url, json=body, headers=headers, timeout=15)
             if r.status_code != 200:
-                logger.error(f"ORS directions API returned error: {r.status_code} - {r.text}")
-                raise ValueError(f"Directions API request failed with status {r.status_code}")
-            
+                logger.error(
+                    f"ORS directions API returned error: {r.status_code} - {r.text}"
+                )
+                raise ValueError(
+                    f"Directions API request failed with status {r.status_code}"
+                )
+
             data = r.json()
         except Exception as e:
             logger.error(f"Failed to fetch directions from ORS: {e}")
@@ -117,7 +113,7 @@ class RoutingService:
             feature = data["features"][0]
             properties = feature["properties"]
             summary = properties["summary"]
-            
+
             # ORS units='mi' gives distance in miles, duration is in seconds
             distance_miles = float(summary["distance"])
             duration_seconds = float(summary["duration"])
@@ -136,7 +132,9 @@ class RoutingService:
             dest_lon=dest_lon,
             distance_miles=distance_miles,
             estimated_duration=duration_seconds,
-            route_geometry=geometry
+            route_geometry=geometry,
         )
-        logger.info(f"Route Cache saved: {start_clean} to {dest_clean} ({distance_miles} miles)")
+        logger.info(
+            f"Route Cache saved: {start_clean} to {dest_clean} ({distance_miles} miles)"
+        )
         return cached_route

@@ -1,0 +1,78 @@
+{
+	"info": {
+		"_postman_id": "0e90a518-0be7-49dd-a7b5-15f763284410",
+		"name": "Fuel Stops Optimization API",
+		"description": "API collection for testing the fuel stops optimization REST service built in Django.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Optimize Route (New York to Los Angeles)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"start\": \"New York, NY\",\n    \"destination\": \"Los Angeles, CA\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8000/api/v1/routes/optimize/",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"api",
+						"v1",
+						"routes",
+						"optimize",
+						""
+					]
+				},
+				"description": "Calculates fuel stop recommendations for a trip between New York and Los Angeles."
+			},
+			"response": []
+		},
+		{
+			"name": "Optimize Route - Validation Error (Same Locations)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"start\": \"Chicago, IL\",\n    \"destination\": \"Chicago, IL\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8000/api/v1/routes/optimize/",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"api",
+						"v1",
+						"routes",
+						"optimize",
+						""
+					]
+				},
+				"description": "Triggers validation error because start and destination are identical."
+			},
+			"response": []
+		}
+	]
+}

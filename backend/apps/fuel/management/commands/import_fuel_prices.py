@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # URL of a comprehensive US Cities Database
 CITIES_DB_URL = "https://raw.githubusercontent.com/kelvins/US-Cities-Database/main/csv/us_cities.csv"
 
+
 class Command(BaseCommand):
     help = "Imports fuel prices from a CSV file, geocodes locations, and performs deduplication and bulk inserts."
 
@@ -21,7 +22,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--csv-path",
             type=str,
-            default=os.path.join(settings.BASE_DIR.parent, "fuel-prices-for-be-assessment.csv"),
+            default=os.path.join(
+                settings.BASE_DIR.parent, "fuel-prices-for-be-assessment.csv"
+            ),
             help="Path to the fuel prices CSV file.",
         )
         parser.add_argument(
@@ -33,36 +36,50 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         csv_path = options["csv_path"]
         force_download = options["force_download_cities"]
-        
+
         t_start = time.time()
-        self.stdout.write(self.style.NOTICE(f"Starting fuel price import from {csv_path}..."))
+        self.stdout.write(
+            self.style.NOTICE(f"Starting fuel price import from {csv_path}...")
+        )
 
         if not os.path.exists(csv_path):
             self.stdout.write(self.style.ERROR(f"CSV file not found at: {csv_path}"))
             return
 
         # 1. Download/Load US Cities Coordinates DB
-        cities_csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_cities.csv")
+        cities_csv_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "us_cities.csv"
+        )
         if not os.path.exists(cities_csv_path) or force_download:
-            self.stdout.write(self.style.NOTICE(f"Downloading US Cities Database from GitHub..."))
+            self.stdout.write(
+                self.style.NOTICE("Downloading US Cities Database from GitHub...")
+            )
             try:
                 r = requests.get(CITIES_DB_URL, timeout=30)
                 r.raise_for_status()
                 with open(cities_csv_path, "wb") as f:
                     f.write(r.content)
-                self.stdout.write(self.style.SUCCESS("Downloaded US Cities Database successfully."))
+                self.stdout.write(
+                    self.style.SUCCESS("Downloaded US Cities Database successfully.")
+                )
             except Exception as e:
-                self.stdout.write(self.style.ERROR(f"Failed to download cities database: {e}"))
+                self.stdout.write(
+                    self.style.ERROR(f"Failed to download cities database: {e}")
+                )
                 # Fallback if download fails and file doesn't exist
                 if not os.path.exists(cities_csv_path):
-                    self.stdout.write(self.style.ERROR("No local cities database available. Exiting."))
+                    self.stdout.write(
+                        self.style.ERROR("No local cities database available. Exiting.")
+                    )
                     return
 
         df_cities = pd.read_csv(cities_csv_path)
         # Standardize cities data
         df_cities["city_clean"] = df_cities["CITY"].astype(str).str.strip().str.upper()
-        df_cities["state_clean"] = df_cities["STATE_CODE"].astype(str).str.strip().str.upper()
-        
+        df_cities["state_clean"] = (
+            df_cities["STATE_CODE"].astype(str).str.strip().str.upper()
+        )
+
         # Build local dictionary for fast O(1) coordinate lookups
         cities_coords = {}
         for _, row in df_cities.iterrows():
@@ -74,25 +91,29 @@ class Command(BaseCommand):
         df_fuel = pd.read_csv(csv_path)
         # Strip whitespace from headers
         df_fuel.columns = [col.strip() for col in df_fuel.columns]
-        
+
         # 3. Load Geocoding Cache to avoid repeat API hits
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geocoding_cache.json")
+        cache_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "geocoding_cache.json"
+        )
         geo_cache = {}
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
                     geo_cache = json.load(f)
             except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Could not load geocoding cache: {e}"))
+                self.stdout.write(
+                    self.style.WARNING(f"Could not load geocoding cache: {e}")
+                )
 
         # Geocoding helper function (Nominatim / ORS)
         ors_key = os.environ.get("ORS_API_KEY")
-        
+
         def geocode_city_state(city, state):
             city_clean = city.strip()
             state_clean = state.strip()
             cache_key = f"{city_clean}, {state_clean}".upper()
-            
+
             if cache_key in geo_cache:
                 return geo_cache[cache_key]
 
@@ -103,7 +124,7 @@ class Command(BaseCommand):
                     params = {
                         "text": f"{city_clean}, {state_clean}, USA",
                         "api_key": ors_key,
-                        "size": 1
+                        "size": 1,
                     }
                     r = requests.get(url, params=params, timeout=10)
                     if r.status_code == 200:
@@ -114,10 +135,18 @@ class Command(BaseCommand):
                             # ORS returns [lon, lat]
                             lon, lat = float(coords[0]), float(coords[1])
                             geo_cache[cache_key] = (lat, lon)
-                            self.stdout.write(self.style.SUCCESS(f"Geocoded via ORS: {cache_key} -> {lat}, {lon}"))
+                            self.stdout.write(
+                                self.style.SUCCESS(
+                                    f"Geocoded via ORS: {cache_key} -> {lat}, {lon}"
+                                )
+                            )
                             return lat, lon
                 except Exception as ex:
-                    self.stdout.write(self.style.WARNING(f"ORS geocoding failed for {cache_key}: {ex}"))
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"ORS geocoding failed for {cache_key}: {ex}"
+                        )
+                    )
 
             # Fallback to Nominatim OpenStreetMap
             try:
@@ -128,23 +157,45 @@ class Command(BaseCommand):
                     "state": state_clean,
                     "country": "United States",
                     "format": "json",
-                    "limit": 1
+                    "limit": 1,
                 }
                 # Also try without country if Canadian province (e.g. AB, ON)
-                if state_clean in ["AB", "ON", "BC", "MB", "SK", "QC", "NB", "NS", "NL", "PE", "YT", "NT", "NU"]:
+                if state_clean in [
+                    "AB",
+                    "ON",
+                    "BC",
+                    "MB",
+                    "SK",
+                    "QC",
+                    "NB",
+                    "NS",
+                    "NL",
+                    "PE",
+                    "YT",
+                    "NT",
+                    "NU",
+                ]:
                     params["country"] = "Canada"
 
-                time.sleep(1.0) # Nominatim policy requires max 1 req/sec
+                time.sleep(1.0)  # Nominatim policy requires max 1 req/sec
                 r = requests.get(url, params=params, headers=headers, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
                     if data:
                         lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
                         geo_cache[cache_key] = (lat, lon)
-                        self.stdout.write(self.style.SUCCESS(f"Geocoded via Nominatim: {cache_key} -> {lat}, {lon}"))
+                        self.stdout.write(
+                            self.style.SUCCESS(
+                                f"Geocoded via Nominatim: {cache_key} -> {lat}, {lon}"
+                            )
+                        )
                         return lat, lon
             except Exception as ex:
-                self.stdout.write(self.style.WARNING(f"Nominatim geocoding failed for {cache_key}: {ex}"))
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Nominatim geocoding failed for {cache_key}: {ex}"
+                    )
+                )
 
             # Return None if both failed
             return None
@@ -152,12 +203,9 @@ class Command(BaseCommand):
         # 4. Resolve Coordinates
         self.stdout.write(self.style.NOTICE("Resolving fuel station coordinates..."))
         resolved_count = 0
-        cache_hit_count = 0
         api_hit_count = 0
         unresolved_count = 0
 
-        station_records = []
-        
         # We process unique city-state combinations to minimize lookups
         unique_locations = df_fuel[["City", "State"]].drop_duplicates()
         location_coords = {}
@@ -166,7 +214,7 @@ class Command(BaseCommand):
             city = str(loc["City"]).strip()
             state = str(loc["State"]).strip()
             key_clean = (city.upper(), state.upper())
-            
+
             # Try offline database first
             if key_clean in cities_coords:
                 location_coords[(city, state)] = cities_coords[key_clean]
@@ -186,13 +234,17 @@ class Command(BaseCommand):
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(geo_cache, f, indent=2)
         except Exception as e:
-            self.stdout.write(self.style.WARNING(f"Could not save geocoding cache: {e}"))
+            self.stdout.write(
+                self.style.WARNING(f"Could not save geocoding cache: {e}")
+            )
 
         # 5. Clean & Deduplicate Data in Memory
         # Sort by Retail Price ascending, so that drop_duplicates will keep the CHEAPEST retail price for duplicates of the same OPIS Truckstop ID
         df_fuel_sorted = df_fuel.sort_values(by="Retail Price", ascending=True)
-        df_fuel_clean = df_fuel_sorted.drop_duplicates(subset=["OPIS Truckstop ID"], keep="first")
-        
+        df_fuel_clean = df_fuel_sorted.drop_duplicates(
+            subset=["OPIS Truckstop ID"], keep="first"
+        )
+
         # 6. Prepare Model Instances
         fuel_price_instances = []
         for _, row in df_fuel_clean.iterrows():
@@ -203,7 +255,7 @@ class Command(BaseCommand):
             state = str(row["State"]).strip()
             rack_id = int(row["Rack ID"]) if pd.notna(row["Rack ID"]) else None
             price = float(row["Retail Price"])
-            
+
             # Fetch coordinates
             coords = location_coords.get((city, state))
             lat, lon = (coords[0], coords[1]) if coords else (None, None)
@@ -225,13 +277,16 @@ class Command(BaseCommand):
         # 7. Bulk Upsert in Chunks
         chunk_size = 500
         total_created = 0
-        total_updated = 0
-        self.stdout.write(self.style.NOTICE(f"Inserting/updating {len(fuel_price_instances)} stations in database..."))
+        self.stdout.write(
+            self.style.NOTICE(
+                f"Inserting/updating {len(fuel_price_instances)} stations in database..."
+            )
+        )
 
         try:
             with transaction.atomic():
                 for i in range(0, len(fuel_price_instances), chunk_size):
-                    chunk = fuel_price_instances[i:i+chunk_size]
+                    chunk = fuel_price_instances[i : i + chunk_size]
                     # bulk_create performs upsert using PostgreSQL's ON CONFLICT
                     res = FuelPrice.objects.bulk_create(
                         chunk,
@@ -250,7 +305,9 @@ class Command(BaseCommand):
                         unique_fields=["opis_truckstop_id"],
                     )
                     total_created += len(res)
-            self.stdout.write(self.style.SUCCESS(f"Successfully processed database updates."))
+            self.stdout.write(
+                self.style.SUCCESS("Successfully processed database updates.")
+            )
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"Database bulk insert failed: {e}"))
             return

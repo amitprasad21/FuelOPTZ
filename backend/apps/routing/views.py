@@ -10,10 +10,13 @@ from apps.optimization.fuel_optimizer import FuelOptimizer
 
 logger = logging.getLogger(__name__)
 
+
 class OptimizeRouteView(APIView):
     def post(self, request, *args, **kwargs):
         t_start = time.time()
-        logger.info(f"OptimizeRouteView: Request received from {request.META.get('REMOTE_ADDR')}")
+        logger.info(
+            f"OptimizeRouteView: Request received from {request.META.get('REMOTE_ADDR')}"
+        )
 
         # 1. Validate Request Data
         serializer = OptimizeRouteSerializer(data=request.data)
@@ -26,9 +29,11 @@ class OptimizeRouteView(APIView):
 
         try:
             # 2. Get Geocoded & Cached Route
-            logger.info(f"OptimizeRouteView: Fetching route from '{start}' to '{destination}'")
+            logger.info(
+                f"OptimizeRouteView: Fetching route from '{start}' to '{destination}'"
+            )
             route = RoutingService.get_route(start, destination)
-            
+
             # Extract coordinates from GeoJSON LineString (GeoJSON uses [lon, lat])
             geojson_coords = route.route_geometry.get("coordinates", [])
             if not geojson_coords:
@@ -39,8 +44,12 @@ class OptimizeRouteView(APIView):
 
             # 3. Retrieve Candidate Fuel Stops Near Route
             logger.info("OptimizeRouteView: Filtering fuel stations near the route...")
-            nearby_stations = FuelService.get_stations_near_route(route_coords, max_distance_miles=15.0)
-            logger.info(f"OptimizeRouteView: Found {len(nearby_stations)} fuel stations near the route.")
+            nearby_stations = FuelService.get_stations_near_route(
+                route_coords, max_distance_miles=15.0
+            )
+            logger.info(
+                f"OptimizeRouteView: Found {len(nearby_stations)} fuel stations near the route."
+            )
 
             # 4. Optimize Refuel Stops
             logger.info("OptimizeRouteView: Starting fuel stop optimization...")
@@ -48,13 +57,17 @@ class OptimizeRouteView(APIView):
                 route_dist_miles=route.distance_miles,
                 candidate_stations=nearby_stations,
                 capacity_gallons=50.0,
-                mpg=10.0
+                mpg=10.0,
             )
-            logger.info("OptimizeRouteView: Fuel stop optimization completed successfully.")
+            logger.info(
+                "OptimizeRouteView: Fuel stop optimization completed successfully."
+            )
 
             # 5. Format Response
             total_duration = time.time() - t_start
-            logger.info(f"OptimizeRouteView: Request processed successfully in {total_duration*1000:.2f}ms")
+            logger.info(
+                f"OptimizeRouteView: Request processed successfully in {total_duration*1000:.2f}ms"
+            )
 
             response_data = {
                 "distance_miles": float(route.distance_miles),
@@ -62,20 +75,19 @@ class OptimizeRouteView(APIView):
                 "fuel_stops": optimization_result["fuel_stops"],
                 "total_gallons": float(optimization_result["total_gallons"]),
                 "total_fuel_cost": float(optimization_result["total_fuel_cost"]),
-                "route_geometry": route.route_geometry
+                "route_geometry": route.route_geometry,
             }
 
             return Response(response_data, status=status.HTTP_200_OK)
 
         except ValueError as ve:
             logger.warning(f"OptimizeRouteView: Validation/Route error: {ve}")
-            return Response(
-                {"error": str(ve)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.exception(f"OptimizeRouteView: Unexpected error occurred: {e}")
             return Response(
-                {"error": "An unexpected error occurred while processing the route optimization. Please try again later."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {
+                    "error": "An unexpected error occurred while processing the route optimization. Please try again later."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
