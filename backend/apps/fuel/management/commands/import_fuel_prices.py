@@ -47,6 +47,35 @@ class Command(BaseCommand):
 
         t_start = time.time()
 
+        # Download Leaflet JS & CSS if they don't exist
+        static_dir = os.path.join(settings.BASE_DIR, "apps", "routing", "static", "routing")
+        os.makedirs(static_dir, exist_ok=True)
+        
+        leaflet_css_path = os.path.join(static_dir, "leaflet.css")
+        leaflet_js_path = os.path.join(static_dir, "leaflet.js")
+        
+        if not os.path.exists(leaflet_css_path):
+            self.stdout.write(self.style.NOTICE("Downloading leaflet.css locally..."))
+            try:
+                r = requests.get("https://unpkg.com/leaflet@1.9.4/dist/leaflet.css", timeout=15)
+                r.raise_for_status()
+                with open(leaflet_css_path, "wb") as f:
+                    f.write(r.content)
+                self.stdout.write(self.style.SUCCESS("Downloaded leaflet.css successfully."))
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f"Failed to download leaflet.css: {e}"))
+                
+        if not os.path.exists(leaflet_js_path):
+            self.stdout.write(self.style.NOTICE("Downloading leaflet.js locally..."))
+            try:
+                r = requests.get("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js", timeout=15)
+                r.raise_for_status()
+                with open(leaflet_js_path, "wb") as f:
+                    f.write(r.content)
+                self.stdout.write(self.style.SUCCESS("Downloaded leaflet.js successfully."))
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f"Failed to download leaflet.js: {e}"))
+
         # 1. Skip logic if records exist
         if FuelPrice.objects.exists() and not force_import:
             self.stdout.write(
@@ -227,8 +256,10 @@ class Command(BaseCommand):
                         if features:
                             coords = features[0]["geometry"]["coordinates"]
                             lon, lat = float(coords[0]), float(coords[1])
-                            geo_cache[cache_key] = (lat, lon)
-                            return lat, lon
+                            from apps.routing.services import RoutingService
+                            if RoutingService.is_in_us(lat, lon):
+                                geo_cache[cache_key] = (lat, lon)
+                                return lat, lon
                 except Exception as ex:
                     logger.warning(f"ORS geocoding failed: {ex}")
 
@@ -249,8 +280,10 @@ class Command(BaseCommand):
                     data = r.json()
                     if data:
                         lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
-                        geo_cache[cache_key] = (lat, lon)
-                        return lat, lon
+                        from apps.routing.services import RoutingService
+                        if RoutingService.is_in_us(lat, lon):
+                            geo_cache[cache_key] = (lat, lon)
+                            return lat, lon
             except Exception as ex:
                 logger.warning(f"Nominatim geocoding failed: {ex}")
 

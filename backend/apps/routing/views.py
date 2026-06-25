@@ -14,212 +14,28 @@ from apps.optimization.fuel_optimizer import FuelOptimizer
 logger = logging.getLogger(__name__)
 
 
-class OptimizeRouteView(APIView):
-    def post(self, request, *args, **kwargs):
-        t_start = time.time()
-        logger.info(
-            f"OptimizeRouteView: Request received from {request.META.get('REMOTE_ADDR')}"
-        )
+def render_map_html(route, route_coords, optimization_result) -> str:
+    route_geojson = {
+        "type": "Feature",
+        "geometry": route.route_geometry,
+        "properties": {},
+    }
+    stops_js = json.dumps(optimization_result["fuel_stops"])
 
-        # 1. Validate Request Data
-        serializer = OptimizeRouteSerializer(data=request.data)
-        if not serializer.is_valid():
-            logger.warning(f"OptimizeRouteView: Validation failed: {serializer.errors}")
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        start = serializer.validated_data["start"]
-        destination = serializer.validated_data["destination"]
-
-        try:
-            # 2. Get Geocoded & Cached Route
-            logger.info(
-                f"OptimizeRouteView: Fetching route from '{start}' to '{destination}'"
-            )
-            route = RoutingService.get_route(start, destination)
-
-            # Extract coordinates from GeoJSON LineString (GeoJSON uses [lon, lat])
-            geojson_coords = route.route_geometry.get("coordinates", [])
-            if not geojson_coords:
-                raise ValueError("Route geometry does not contain coordinates.")
-
-            # Convert from [lon, lat] to (lat, lon) for our calculations
-            route_coords = [(float(pt[1]), float(pt[0])) for pt in geojson_coords]
-
-            # 3. Retrieve Candidate Fuel Stops Near Route
-            logger.info("OptimizeRouteView: Filtering fuel stations near the route...")
-            nearby_stations = FuelService.get_stations_near_route(
-                route_coords, max_distance_miles=15.0
-            )
-            logger.info(
-                f"OptimizeRouteView: Found {len(nearby_stations)} fuel stations near the route."
-            )
-
-            # 4. Optimize Refuel Stops
-            logger.info("OptimizeRouteView: Starting fuel stop optimization...")
-            optimization_result = FuelOptimizer.optimize(
-                route_dist_miles=route.distance_miles,
-                candidate_stations=nearby_stations,
-                capacity_gallons=50.0,
-                mpg=10.0,
-            )
-            logger.info(
-                "OptimizeRouteView: Fuel stop optimization completed successfully."
-            )
-
-            # On-the-fly geocoding for recommended stops to guarantee precise coordinates
-            for stop in optimization_result["fuel_stops"]:
-                try:
-                    from apps.fuel.models import FuelPrice
-
-                    station_db = FuelPrice.objects.filter(
-                        opis_truckstop_id=stop["opis_truckstop_id"]
-                    ).first()
-                    if station_db:
-                        coords = RoutingService.geocode_address(
-                            station_db.address, station_db.city, station_db.state
-                        )
-                        if coords:
-                            lat, lon = coords
-                            station_db.latitude = lat
-                            station_db.longitude = lon
-                            station_db.save(update_fields=["latitude", "longitude"])
-                            stop["latitude"] = lat
-                            stop["longitude"] = lon
-                except Exception as ex:
-                    logger.warning(
-                        f"On-the-fly geocoding failed for stop {stop['name']}: {ex}"
-                    )
-
-            # 5. Format Response
-            total_duration = time.time() - t_start
-            logger.info(
-                f"OptimizeRouteView: Request processed successfully in {total_duration*1000:.2f}ms"
-            )
-
-            from django.urls import reverse
-            import urllib.parse
-
-            map_base_url = request.build_absolute_uri(reverse("route_map"))
-            params = urllib.parse.urlencode(
-                {"start": start, "destination": destination}
-            )
-            map_url = f"{map_base_url}?{params}"
-
-            response_data = {
-                "distance_miles": float(route.distance_miles),
-                "estimated_duration": float(route.estimated_duration),
-                "fuel_stops": optimization_result["fuel_stops"],
-                "total_gallons": float(optimization_result["total_gallons"]),
-                "total_fuel_cost": float(optimization_result["total_fuel_cost"]),
-                "map_url": map_url,
-                "route_geometry": route.route_geometry,
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
-
-        except ValueError as ve:
-            logger.warning(f"OptimizeRouteView: Validation/Route error: {ve}")
-            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            logger.exception(f"OptimizeRouteView: Unexpected error occurred: {e}")
-            return Response(
-                {
-                    "error": "An unexpected error occurred while processing the route optimization. Please try again later."
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-class RouteMapView(APIView):
-    def get(self, request, *args, **kwargs):
-        start = request.GET.get("start")
-        destination = request.GET.get("destination")
-
-        if not start or not destination:
-            return HttpResponse("Missing start or destination parameter.", status=400)
-
-        try:
-            start_clean = start.strip().upper()
-            dest_clean = destination.strip().upper()
-            route = RouteCache.objects.filter(
-                start_query=start_clean, destination_query=dest_clean
-            ).first()
-
-            if not route:
-                route = RoutingService.get_route(start, destination)
-
-            geojson_coords = route.route_geometry.get("coordinates", [])
-            if not geojson_coords:
-                raise ValueError("Route geometry does not contain coordinates.")
-
-            route_coords = [(float(pt[1]), float(pt[0])) for pt in geojson_coords]
-
-            nearby_stations = FuelService.get_stations_near_route(
-                route_coords, max_distance_miles=15.0
-            )
-
-            optimization_result = FuelOptimizer.optimize(
-                route_dist_miles=route.distance_miles,
-                candidate_stations=nearby_stations,
-                capacity_gallons=50.0,
-                mpg=10.0,
-            )
-
-            # Geocode recommended stops on the fly for exact coordinates
-            for stop in optimization_result["fuel_stops"]:
-                try:
-                    from apps.fuel.models import FuelPrice
-
-                    station_db = FuelPrice.objects.filter(
-                        opis_truckstop_id=stop["opis_truckstop_id"]
-                    ).first()
-                    if station_db:
-                        coords = RoutingService.geocode_address(
-                            station_db.address, station_db.city, station_db.state
-                        )
-                        if coords:
-                            lat, lon = coords
-                            station_db.latitude = lat
-                            station_db.longitude = lon
-                            station_db.save(update_fields=["latitude", "longitude"])
-                            stop["latitude"] = lat
-                            stop["longitude"] = lon
-                except Exception as ex:
-                    logger.warning(
-                        f"On-the-fly geocoding failed for stop {stop['name']}: {ex}"
-                    )
-
-            html_content = self.render_map_html(
-                route, route_coords, optimization_result
-            )
-            return HttpResponse(html_content, content_type="text/html")
-
-        except Exception as e:
-            logger.exception(f"Error rendering route map: {e}")
-            return HttpResponse(f"Error rendering route map: {str(e)}", status=500)
-
-    def render_map_html(self, route, route_coords, optimization_result) -> str:
-        route_geojson = {
-            "type": "Feature",
-            "geometry": route.route_geometry,
-            "properties": {},
-        }
-        stops_js = json.dumps(optimization_result["fuel_stops"])
-
-        html = f"""<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>FuelOPTZ - Route Map</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/routing/leaflet.css" />
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <style>
         body, html {{
             margin: 0;
             padding: 0;
             height: 100%;
-            font-family: 'Outfit', sans-serif;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: #121212;
             color: #e0e0e0;
         }}
@@ -331,7 +147,7 @@ class RouteMapView(APIView):
     
     <div id="map"></div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/routing/leaflet.js"></script>
     <script>
         document.getElementById("info-start").innerText = {json.dumps(route.start_query)};
         document.getElementById("info-dest").innerText = {json.dumps(route.destination_query)};
@@ -363,7 +179,7 @@ class RouteMapView(APIView):
             html: `<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
                     <path d="M16 0C9.37 0 4 5.37 4 12c0 9 12 20 12 20s12-11 12-20c0-6.63-5.37-12-12-12z" fill="${{color}}"/>
                     <circle cx="16" cy="12" r="6" fill="#121212"/>
-                    <text x="16" y="15" fill="#ffffff" font-size="10" font-family="'Outfit', sans-serif" font-weight="bold" text-anchor="middle">${{char}}</text>
+                    <text x="16" y="15" fill="#ffffff" font-size="10" font-family="sans-serif" font-weight="bold" text-anchor="middle">${{char}}</text>
                    </svg>`,
             className: 'custom-svg-icon',
             iconSize: [32, 32],
@@ -411,4 +227,260 @@ class RouteMapView(APIView):
 </body>
 </html>
 """
-        return html
+    return html
+
+
+class OptimizeRouteView(APIView):
+    def post(self, request, *args, **kwargs):
+        t_start = time.time()
+        logger.info(
+            f"OptimizeRouteView: Request received from {request.META.get('REMOTE_ADDR')}"
+        )
+
+        # 1. Validate Request Data
+        serializer = OptimizeRouteSerializer(data=request.data)
+        if not serializer.is_valid():
+            logger.warning(f"OptimizeRouteView: Validation failed: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        start = serializer.validated_data["start"]
+        destination = serializer.validated_data["destination"]
+
+        try:
+            # 2. Get Geocoded & Cached Route
+            logger.info(
+                f"OptimizeRouteView: Fetching route from '{start}' to '{destination}'"
+            )
+            route = RoutingService.get_route(start, destination)
+
+            # Extract coordinates from GeoJSON LineString (GeoJSON uses [lon, lat])
+            geojson_coords = route.route_geometry.get("coordinates", [])
+            if not geojson_coords:
+                raise ValueError("Route geometry does not contain coordinates.")
+
+            # Convert from [lon, lat] to (lat, lon) for our calculations
+            route_coords = [(float(pt[1]), float(pt[0])) for pt in geojson_coords]
+
+            # 3. Check cache for optimization results
+            if route.optimization_results:
+                logger.info("OptimizeRouteView: Reusing cached optimization results.")
+                optimization_result = route.optimization_results
+            else:
+                # Retrieve Candidate Fuel Stops Near Route
+                logger.info("OptimizeRouteView: Filtering fuel stations near the route...")
+                nearby_stations = FuelService.get_stations_near_route(
+                    route_coords, max_distance_miles=15.0
+                )
+
+                # Fallback: if no stations near route and route <= 500 miles, fetch cheapest station in DB
+                if not nearby_stations and route.distance_miles <= 500.0:
+                    from apps.fuel.models import FuelPrice
+                    cheapest_station = FuelPrice.objects.order_by("retail_price").first()
+                    if cheapest_station:
+                        nearby_stations = [{
+                            "id": str(cheapest_station.id),
+                            "opis_truckstop_id": cheapest_station.opis_truckstop_id,
+                            "name": cheapest_station.truckstop_name,
+                            "address": cheapest_station.address,
+                            "city": cheapest_station.city,
+                            "state": cheapest_station.state,
+                            "price": float(cheapest_station.retail_price),
+                            "latitude": cheapest_station.latitude,
+                            "longitude": cheapest_station.longitude,
+                            "dist_to_route": 0.0,
+                            "dist": float(route.distance_miles / 2.0),
+                        }]
+
+                logger.info(
+                    f"OptimizeRouteView: Found {len(nearby_stations)} fuel stations near the route."
+                )
+
+                # 4. Optimize Refuel Stops
+                logger.info("OptimizeRouteView: Starting fuel stop optimization...")
+                optimization_result = FuelOptimizer.optimize(
+                    route_dist_miles=route.distance_miles,
+                    candidate_stations=nearby_stations,
+                    capacity_gallons=50.0,
+                    mpg=10.0,
+                )
+                logger.info(
+                    "OptimizeRouteView: Fuel stop optimization completed successfully."
+                )
+
+                # Check database for coordinates first, fallback to on-the-fly geocoding
+                for stop in optimization_result["fuel_stops"]:
+                    try:
+                        from apps.fuel.models import FuelPrice
+
+                        station_db = FuelPrice.objects.filter(
+                            opis_truckstop_id=stop["opis_truckstop_id"]
+                        ).first()
+                        if station_db:
+                            if station_db.latitude is not None and station_db.longitude is not None:
+                                stop["latitude"] = station_db.latitude
+                                stop["longitude"] = station_db.longitude
+                            else:
+                                coords = RoutingService.geocode_address(
+                                    station_db.address, station_db.city, station_db.state
+                                )
+                                if coords:
+                                    lat, lon = coords
+                                    station_db.latitude = lat
+                                    station_db.longitude = lon
+                                    station_db.save(update_fields=["latitude", "longitude"])
+                                    stop["latitude"] = lat
+                                    stop["longitude"] = lon
+                    except Exception as ex:
+                        logger.warning(
+                            f"On-the-fly geocoding failed for stop {stop['name']}: {ex}"
+                        )
+
+                # Save optimization results to RouteCache
+                route.optimization_results = optimization_result
+                route.save(update_fields=["optimization_results"])
+
+            # 5. Format Response
+            total_duration = time.time() - t_start
+            logger.info(
+                f"OptimizeRouteView: Request processed successfully in {total_duration*1000:.2f}ms"
+            )
+
+            from django.urls import reverse
+            import urllib.parse
+
+            map_base_url = request.build_absolute_uri(reverse("route_map"))
+            params = urllib.parse.urlencode(
+                {"start": start, "destination": destination}
+            )
+            map_url = f"{map_base_url}?{params}"
+
+            map_html = render_map_html(route, route_coords, optimization_result)
+
+            response_data = {
+                "distance_miles": float(route.distance_miles),
+                "estimated_duration": float(route.estimated_duration),
+                "fuel_stops": optimization_result["fuel_stops"],
+                "total_gallons": float(optimization_result["total_gallons"]),
+                "total_fuel_cost": float(optimization_result["total_fuel_cost"]),
+                "map_url": map_url,
+                "map_html": map_html,
+                "route_geometry": route.route_geometry,
+            }
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
+        except ValueError as ve:
+            logger.warning(f"OptimizeRouteView: Validation/Route error: {ve}")
+            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception(f"OptimizeRouteView: Unexpected error occurred: {e}")
+            return Response(
+                {
+                    "error": "An unexpected error occurred while processing the route optimization. Please try again later."
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class RouteMapView(APIView):
+    def get(self, request, *args, **kwargs):
+        start = request.GET.get("start")
+        destination = request.GET.get("destination")
+
+        if not start or not destination:
+            return HttpResponse("Missing start or destination parameter.", status=400)
+
+        try:
+            start_clean = start.strip().upper()
+            dest_clean = destination.strip().upper()
+            route = RouteCache.objects.filter(
+                start_query=start_clean, destination_query=dest_clean
+            ).first()
+
+            if not route:
+                route = RoutingService.get_route(start, destination)
+
+            geojson_coords = route.route_geometry.get("coordinates", [])
+            if not geojson_coords:
+                raise ValueError("Route geometry does not contain coordinates.")
+
+            route_coords = [(float(pt[1]), float(pt[0])) for pt in geojson_coords]
+
+            # Reuse cached optimization results if available
+            if route.optimization_results:
+                logger.info("RouteMapView: Reusing cached optimization results.")
+                optimization_result = route.optimization_results
+            else:
+                nearby_stations = FuelService.get_stations_near_route(
+                    route_coords, max_distance_miles=15.0
+                )
+
+                # Fallback: if no stations near route and route <= 500 miles, fetch cheapest station in DB
+                if not nearby_stations and route.distance_miles <= 500.0:
+                    from apps.fuel.models import FuelPrice
+                    cheapest_station = FuelPrice.objects.order_by("retail_price").first()
+                    if cheapest_station:
+                        nearby_stations = [{
+                            "id": str(cheapest_station.id),
+                            "opis_truckstop_id": cheapest_station.opis_truckstop_id,
+                            "name": cheapest_station.truckstop_name,
+                            "address": cheapest_station.address,
+                            "city": cheapest_station.city,
+                            "state": cheapest_station.state,
+                            "price": float(cheapest_station.retail_price),
+                            "latitude": cheapest_station.latitude,
+                            "longitude": cheapest_station.longitude,
+                            "dist_to_route": 0.0,
+                            "dist": float(route.distance_miles / 2.0),
+                        }]
+
+                optimization_result = FuelOptimizer.optimize(
+                    route_dist_miles=route.distance_miles,
+                    candidate_stations=nearby_stations,
+                    capacity_gallons=50.0,
+                    mpg=10.0,
+                )
+
+                # Check database for coordinates first, fallback to on-the-fly geocoding
+                for stop in optimization_result["fuel_stops"]:
+                    try:
+                        from apps.fuel.models import FuelPrice
+
+                        station_db = FuelPrice.objects.filter(
+                            opis_truckstop_id=stop["opis_truckstop_id"]
+                        ).first()
+                        if station_db:
+                            if station_db.latitude is not None and station_db.longitude is not None:
+                                stop["latitude"] = station_db.latitude
+                                stop["longitude"] = station_db.longitude
+                            else:
+                                coords = RoutingService.geocode_address(
+                                    station_db.address, station_db.city, station_db.state
+                                )
+                                if coords:
+                                    lat, lon = coords
+                                    station_db.latitude = lat
+                                    station_db.longitude = lon
+                                    station_db.save(update_fields=["latitude", "longitude"])
+                                    stop["latitude"] = lat
+                                    stop["longitude"] = lon
+                    except Exception as ex:
+                        logger.warning(
+                            f"On-the-fly geocoding failed for stop {stop['name']}: {ex}"
+                        )
+
+                # Save optimization results to RouteCache
+                route.optimization_results = optimization_result
+                route.save(update_fields=["optimization_results"])
+
+            html_content = render_map_html(
+                route, route_coords, optimization_result
+            )
+            return HttpResponse(html_content, content_type="text/html")
+
+        except ValueError as ve:
+            logger.warning(f"Error rendering route map: {ve}")
+            return HttpResponse(f"Invalid request params or route data: {str(ve)}", status=400)
+        except Exception as e:
+            logger.exception(f"Error rendering route map: {e}")
+            return HttpResponse(f"Error rendering route map: {str(e)}", status=500)

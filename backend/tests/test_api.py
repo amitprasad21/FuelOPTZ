@@ -105,10 +105,11 @@ def test_optimize_endpoint_success(
     assert r.status_code == status.HTTP_200_OK
     assert r.data["distance_miles"] == 180.0
     assert r.data["estimated_duration"] == 10800.0
-    assert r.data["total_gallons"] == 18.0  # (180 miles / 10 mpg) refilled to full
-    assert len(r.data["fuel_stops"]) == 1
-    assert r.data["fuel_stops"][0]["name"] == "MOCK STOP B"
-    assert r.data["total_fuel_cost"] == 45.0
+    assert r.data["total_gallons"] == 18.0
+    assert len(r.data["fuel_stops"]) == 2
+    assert r.data["fuel_stops"][0]["name"] == "MOCK STOP A"
+    assert r.data["fuel_stops"][1]["name"] == "MOCK STOP B"
+    assert abs(r.data["total_fuel_cost"] - 53.30) < 0.05
     assert "map_url" in r.data
     assert "route_geometry" in r.data
 

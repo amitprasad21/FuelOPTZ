@@ -52,226 +52,155 @@ class FuelOptimizer:
     ) -> dict:
         """
         Calculates the optimal fuel stops, fuel quantities, and costs.
-
-        Args:
-            route_dist_miles: Total distance of the route in miles.
-            candidate_stations: List of dicts representing fuel stations near the route.
-                                Must contain 'name', 'address', 'city', 'state', 'price', 'dist', 'latitude', 'longitude'.
-            capacity_gallons: Maximum fuel capacity of the vehicle (default 50.0).
-            mpg: Fuel efficiency of the vehicle in miles per gallon (default 10.0).
-
-        Returns:
-            A dict containing:
-                - fuel_stops: List of optimal refueling stops with details.
-                - total_gallons: Total gallons of fuel purchased.
-                - total_fuel_cost: Total cost of fuel purchased.
+        Strictly respects the 50-gallon tank capacity constraints using a
+        capacity-constrained greedy allocation model.
         """
-        # 1. Sort stations by distance along the route
-        stations = sorted(candidate_stations, key=lambda x: x["dist"])
+        # 1. Clip distances to [0.0, route_dist_miles] and sort stations by distance
+        stations = []
+        for s in candidate_stations:
+            s_copy = s.copy()
+            s_copy["dist"] = max(0.0, min(s_copy["dist"], route_dist_miles))
+            stations.append(s_copy)
+        stations = sorted(stations, key=lambda x: x["dist"])
 
-        # 2. Add Start and Destination as dummy stations to build the full graph
-        start_stop = {
-            "name": "Start Location",
-            "address": "Origin",
-            "city": "Start",
-            "state": "US",
-            "price": float(
-                "inf"
-            ),  # Start has 'infinite' price so we always want to leave it ASAP
-            "dist": 0.0,
-            "latitude": 0.0,
-            "longitude": 0.0,
-        }
-        dest_stop = {
-            "name": "Destination",
-            "address": "Terminus",
-            "city": "End",
-            "state": "US",
-            "price": 0.0,  # Destination price is 0.0 so we want to arrive with 0 fuel
-            "dist": route_dist_miles,
-            "latitude": 0.0,
-            "longitude": 0.0,
-        }
-        all_stops = [start_stop] + stations + [dest_stop]
+        # Deduplicate stations at exactly the same distance (keep cheapest)
+        unique_stations = []
+        for s in stations:
+            if unique_stations and abs(unique_stations[-1]["dist"] - s["dist"]) < 1e-5:
+                if s["price"] < unique_stations[-1]["price"]:
+                    unique_stations[-1] = s
+            else:
+                unique_stations.append(s)
+        stations = unique_stations
 
-        current_idx = 0
-        current_fuel = capacity_gallons
         max_range = capacity_gallons * mpg
-        purchases = []
 
-        while current_idx < len(all_stops) - 1:
-            curr = all_stops[current_idx]
-
-            # Find all reachable stops from current position
-            reachable_stops = []
-            for j in range(current_idx + 1, len(all_stops)):
-                dist_to_j = all_stops[j]["dist"] - curr["dist"]
-                if dist_to_j <= max_range:
-                    reachable_stops.append((j, all_stops[j]))
-                else:
-                    break
-
-            if not reachable_stops:
+        # 2. Check feasibility of completing the route
+        if not stations:
+            if route_dist_miles > max_range:
                 raise ValueError(
                     f"Route cannot be completed! No fuel stations are reachable within "
-                    f"the {max_range:.0f}-mile vehicle range from '{curr['name']}' at mile {curr['dist']:.1f}."
+                    f"the {max_range:.0f}-mile vehicle range."
+                )
+            return {
+                "fuel_stops": [],
+                "total_gallons": 0.0,
+                "total_fuel_cost": 0.0,
+            }
+
+        # Check first station range
+        if stations[0]["dist"] > max_range:
+            raise ValueError(
+                f"Route cannot be completed! First fuel station '{stations[0]['name']}' "
+                f"at mile {stations[0]['dist']:.1f} is beyond the {max_range:.0f}-mile vehicle range."
+            )
+
+        # Check range between consecutive stations
+        for i in range(len(stations) - 1):
+            dist_between = stations[i + 1]["dist"] - stations[i]["dist"]
+            if dist_between > max_range:
+                raise ValueError(
+                    f"Route cannot be completed! Distance between station '{stations[i]['name']}' "
+                    f"and '{stations[i + 1]['name']}' ({dist_between:.1f} miles) exceeds the {max_range:.0f}-mile vehicle range."
                 )
 
-            # Find the first reachable stop that is cheaper than our current stop
-            cheaper_stop = None
-            for idx, stop in reachable_stops:
-                if stop["price"] < curr["price"]:
-                    cheaper_stop = (idx, stop)
-                    break
+        # Check distance from last station to destination
+        dist_to_dest = route_dist_miles - stations[-1]["dist"]
+        if dist_to_dest > max_range:
+            raise ValueError(
+                f"Route cannot be completed! Distance from last station '{stations[-1]['name']}' "
+                f"to destination ({dist_to_dest:.1f} miles) exceeds the {max_range:.0f}-mile vehicle range."
+            )
 
-            if cheaper_stop:
-                # Case A: Found a cheaper stop in range. Buy only enough fuel to reach it.
-                next_idx, next_stop = cheaper_stop
-                dist_to_next = next_stop["dist"] - curr["dist"]
-                fuel_needed = dist_to_next / mpg
+        # 3. Define segments and demands (fuel consumed per segment)
+        # Segments:
+        # Segment 1: from 0 to stations[0]['dist']
+        # Segment i (for i = 2..n): from stations[i-2]['dist'] to stations[i-1]['dist']
+        # Segment n+1: from stations[-1]['dist'] to route_dist_miles
+        points = [0.0] + [s["dist"] for s in stations] + [route_dist_miles]
+        n = len(stations)
 
-                if current_fuel >= fuel_needed:
-                    fuel_to_buy = 0.0
-                else:
-                    fuel_to_buy = fuel_needed - current_fuel
+        c = []
+        for i in range(len(points) - 1):
+            c.append((points[i + 1] - points[i]) / mpg)
 
-                if fuel_to_buy > 0.0:
-                    cost = fuel_to_buy * curr["price"]
-                    purchases.append(
-                        {
-                            "name": curr["name"],
-                            "address": curr["address"],
-                            "city": curr["city"],
-                            "state": curr["state"],
-                            "price": curr["price"],
-                            "latitude": curr["latitude"],
-                            "longitude": curr["longitude"],
-                            "gallons": fuel_to_buy,
-                            "cost": cost,
-                            "dist": curr["dist"],
-                        }
-                    )
-                    current_fuel = 0.0
-                else:
-                    current_fuel -= fuel_needed
+        # F[k] is the fuel level leaving station k (for k = 1..n)
+        # Initially F[k] = 0 for all k. F[0] is start (virtual)
+        F = [0.0] * (n + 1)
+        purchases = [0.0] * (n + 1)  # 1-indexed: purchase amount at station j (for j = 1..n)
 
-                current_idx = next_idx
+        # 4. Allocate segment demands to available stations
+        for i in range(1, len(c) + 1):
+            remaining_c = c[i - 1]
+            if remaining_c <= 0:
+                continue
+
+            # Available stations to purchase fuel for segment i:
+            # Segment 1 (i=1): must be purchased at station 1
+            # Segment i (i>=2): can be purchased at any station 1 to min(i-1, n)
+            if i == 1:
+                available_indices = [1]
             else:
-                # Case B: No cheaper stop in range. Current stop is the cheapest local option.
-                # Check if destination is reachable
-                dest_in_range = False
-                for idx, stop in reachable_stops:
-                    if stop["name"] == "Destination":
-                        dest_in_range = True
-                        dest_stop = stop
-                        break
+                available_indices = list(range(1, min(i - 1, n) + 1))
 
-                if dest_in_range:
-                    # Subcase B1: Destination is reachable. Buy only enough to reach it.
-                    dist_to_dest = dest_stop["dist"] - curr["dist"]
-                    fuel_needed = dist_to_dest / mpg
+            # Sort available indices by price ascending
+            sorted_indices = sorted(
+                available_indices, key=lambda idx: stations[idx - 1]["price"]
+            )
 
-                    if current_fuel >= fuel_needed:
-                        fuel_to_buy = 0.0
-                    else:
-                        fuel_to_buy = fuel_needed - current_fuel
-
-                    if fuel_to_buy > 0.0:
-                        cost = fuel_to_buy * curr["price"]
-                        purchases.append(
-                            {
-                                "name": curr["name"],
-                                "address": curr["address"],
-                                "city": curr["city"],
-                                "state": curr["state"],
-                                "price": curr["price"],
-                                "latitude": curr["latitude"],
-                                "longitude": curr["longitude"],
-                                "gallons": fuel_to_buy,
-                                "cost": cost,
-                                "dist": curr["dist"],
-                            }
-                        )
-                    break  # Destination reached, exit optimization loop
-                else:
-                    # Subcase B2: Destination is not reachable. Fill tank to maximum capacity here.
-                    fuel_to_buy = capacity_gallons - current_fuel
-                    if fuel_to_buy > 0.0:
-                        cost = fuel_to_buy * curr["price"]
-                        purchases.append(
-                            {
-                                "name": curr["name"],
-                                "address": curr["address"],
-                                "city": curr["city"],
-                                "state": curr["state"],
-                                "price": curr["price"],
-                                "latitude": curr["latitude"],
-                                "longitude": curr["longitude"],
-                                "gallons": fuel_to_buy,
-                                "cost": cost,
-                                "dist": curr["dist"],
-                            }
-                        )
-                    current_fuel = capacity_gallons
-
-                    # Move to the cheapest reachable station in range
-                    # This station becomes our next decision point
-                    cheapest_reachable = min(
-                        reachable_stops, key=lambda x: x[1]["price"]
-                    )
-                    next_idx, next_stop = cheapest_reachable
-                    dist_to_next = next_stop["dist"] - curr["dist"]
-                    current_fuel -= dist_to_next / mpg
-                    current_idx = next_idx
-
-        total_gallons = sum(p["gallons"] for p in purchases)
-
-        # Enforce that the tank must end at 50 gallons (refilled to full)
-        target_total = route_dist_miles / mpg
-        deficit = target_total - total_gallons
-
-        if deficit > 0 and candidate_stations:
-            # Find the cheapest station on the entire route to buy this deficit
-            cheapest_station = min(candidate_stations, key=lambda x: x["price"])
-
-            # Check if this station is already in purchases
-            existing_purchase = None
-            for p in purchases:
-                if (
-                    abs(p["dist"] - cheapest_station["dist"]) < 1e-3
-                    and p["name"] == cheapest_station["name"]
-                ):
-                    existing_purchase = p
+            for j in sorted_indices:
+                if remaining_c <= 0:
                     break
 
-            if existing_purchase:
-                existing_purchase["gallons"] += deficit
-                existing_purchase["cost"] = (
-                    existing_purchase["gallons"] * existing_purchase["price"]
+                # Capacity constraint: for all intermediate stations k from j to i-1,
+                # fuel level leaving k cannot exceed capacity_gallons.
+                # So we can allocate at most: capacity_gallons - F[k]
+                if i - 1 >= j:
+                    max_g = min(capacity_gallons - F[k] for k in range(j, i))
+                else:
+                    max_g = capacity_gallons
+
+                g = min(remaining_c, max_g)
+                if g > 0:
+                    purchases[j] += g
+                    # Update F[k] for all stations k from j to i-1
+                    for k in range(j, min(i, n + 1)):
+                        F[k] += g
+                    remaining_c -= g
+
+            if remaining_c > 1e-5:
+                # If the route is feasible, we should always be able to allocate
+                raise ValueError(
+                    f"Internal optimization error: Could not allocate {remaining_c:.2f} gallons for segment {i}."
                 )
-            else:
-                cost = deficit * cheapest_station["price"]
-                new_stop = {
-                    "name": cheapest_station["name"],
-                    "address": cheapest_station["address"],
-                    "city": cheapest_station["city"],
-                    "state": cheapest_station["state"],
-                    "price": cheapest_station["price"],
-                    "latitude": cheapest_station["latitude"],
-                    "longitude": cheapest_station["longitude"],
-                    "gallons": deficit,
-                    "cost": cost,
-                    "dist": cheapest_station["dist"],
-                }
-                purchases.append(new_stop)
-                purchases.sort(key=lambda x: x["dist"])
 
-        # Recompute totals after post-processing
-        total_gallons = sum(p["gallons"] for p in purchases)
-        total_cost = sum(p["cost"] for p in purchases)
+        # 5. Format response fuel stops
+        fuel_stops = []
+        for j in range(1, n + 1):
+            if purchases[j] > 0.0:
+                station = stations[j - 1]
+                cost = purchases[j] * station["price"]
+                fuel_stops.append(
+                    {
+                        "opis_truckstop_id": station.get("opis_truckstop_id"),
+                        "name": station["name"],
+                        "address": station["address"],
+                        "city": station["city"],
+                        "state": station["state"],
+                        "price": station["price"],
+                        "latitude": station["latitude"],
+                        "longitude": station["longitude"],
+                        "gallons": float(purchases[j]),
+                        "cost": float(cost),
+                        "dist": float(station["dist"]),
+                    }
+                )
+
+        total_gallons = sum(p["gallons"] for p in fuel_stops)
+        total_cost = sum(p["cost"] for p in fuel_stops)
 
         return {
-            "fuel_stops": purchases,
+            "fuel_stops": fuel_stops,
             "total_gallons": float(total_gallons),
             "total_fuel_cost": float(total_cost),
         }

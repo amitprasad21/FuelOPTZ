@@ -34,7 +34,10 @@ SECRET_KEY = os.environ.get(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get("DEBUG", "True").lower() == "true"
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+if DEBUG:
+    if "*" not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append("*")
 
 
 # Application definition
@@ -87,7 +90,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 # Database
 # Parse DATABASE_URL from .env or isolate to SQLite during tests
-if "test" in sys.argv:
+if "test" in sys.argv or "pytest" in sys.argv[0] or any("pytest" in arg for arg in sys.argv) or "PYTEST_CURRENT_TEST" in os.environ:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -155,7 +158,10 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # CORS
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = os.environ.get("CORS_ALLOW_ALL_ORIGINS", str(DEBUG)).lower() == "true"
+cors_origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+if cors_origins:
+    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
 
 # REST Framework Config
 REST_FRAMEWORK = {

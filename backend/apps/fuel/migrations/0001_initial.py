@@ -1,13 +1,5 @@
-import os
-from django.db import migrations
-
-
-def load_sql(filename):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
-    sql_path = os.path.join(project_root, "sql", filename)
-    with open(sql_path, "r", encoding="utf-8") as f:
-        return f.read()
+import uuid
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
@@ -17,5 +9,29 @@ class Migration(migrations.Migration):
     dependencies = []
 
     operations = [
-        migrations.RunSQL(load_sql("001_create_fuel_prices.sql")),
+        migrations.CreateModel(
+            name='FuelPrice',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('opis_truckstop_id', models.IntegerField(unique=True)),
+                ('truckstop_name', models.CharField(max_length=255)),
+                ('address', models.CharField(max_length=255)),
+                ('city', models.CharField(max_length=255)),
+                ('state', models.CharField(max_length=50)),
+                ('rack_id', models.IntegerField(blank=True, null=True)),
+                ('retail_price', models.DecimalField(decimal_places=4, max_digits=10)),
+                ('latitude', models.FloatField(blank=True, null=True)),
+                ('longitude', models.FloatField(blank=True, null=True)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+            ],
+            options={
+                'db_table': 'fuel_prices',
+                'indexes': [
+                    models.Index(fields=['latitude', 'longitude'], name='idx_fuel_prices_lat_lon'),
+                    models.Index(fields=['state', 'city'], name='idx_fuel_prices_state_city'),
+                    models.Index(fields=['retail_price'], name='idx_fuel_prices_price'),
+                ],
+            },
+        ),
     ]

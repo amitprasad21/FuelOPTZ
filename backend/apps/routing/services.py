@@ -229,6 +229,11 @@ class RoutingService:
         start_lat, start_lon = cls.geocode_query(start_query)
         dest_lat, dest_lon = cls.geocode_query(dest_query)
 
+        if abs(start_lat - dest_lat) < 1e-6 and abs(start_lon - dest_lon) < 1e-6:
+            raise ValueError(
+                "Start and destination coordinates are the same."
+            )
+
         # 3. Call OpenRouteService Directions API (GeoJSON endpoint)
         ors_key = os.environ.get("ORS_API_KEY")
         if not ors_key:

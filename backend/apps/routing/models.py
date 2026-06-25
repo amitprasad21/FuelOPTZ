@@ -13,10 +13,14 @@ class RouteCache(models.Model):
     distance_miles = models.FloatField()
     estimated_duration = models.FloatField()
     route_geometry = models.JSONField()
+    optimization_results = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "route_cache"
+        indexes = [
+            models.Index(fields=["start_query", "destination_query"], name="idx_route_cache_queries"),
+        ]
 
     def __str__(self):
         return f"{self.start_query} to {self.destination_query} ({self.distance_miles} miles)"

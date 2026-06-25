@@ -33,7 +33,7 @@ class FuelService:
         Given a list of (latitude, longitude) route coordinates:
         1. Queries stations in the database within the expanded route bounding box.
         2. Filters stations within max_distance_miles of the route.
-        3. Projects each station to the closest point on the route to determine its mile marker.
+        3. Projects each station to the closest point on the route segments to determine its exact mile marker.
         4. Returns a list of station dicts sorted by their distance along the route.
         """
         if not route_coords:
@@ -43,7 +43,6 @@ class FuelService:
         route_lons = np.array([pt[1] for pt in route_coords], dtype=np.float64)
 
         # 1. Compute bounding box and query candidates from database
-        # 15 miles ~ 0.25 degrees of latitude/longitude as an approximation
         margin = max_distance_miles / 69.0  # 69 miles per degree of latitude
         min_lat = float(np.min(route_lats)) - margin
         max_lat = float(np.max(route_lats)) + margin
@@ -72,53 +71,55 @@ class FuelService:
         route_cum_dists = np.zeros(len(route_coords), dtype=np.float64)
         route_cum_dists[1:] = np.cumsum(seg_dists)
 
-        # 2b. Downsample route points for spatial distance matrix to keep it under ~2ms
-        downsampled_coords = [route_coords[0]]
-        downsampled_indices = [0]
-        for idx in range(1, len(route_coords) - 1):
-            pt = route_coords[idx]
-            last_pt = downsampled_coords[-1]
-            dist = cls.haversine_distance_vectorized(
-                last_pt[0], last_pt[1], pt[0], pt[1]
-            )
-            if dist >= 1.5:
-                downsampled_coords.append(pt)
-                downsampled_indices.append(idx)
-        if (len(route_coords) - 1) not in downsampled_indices:
-            downsampled_coords.append(route_coords[-1])
-            downsampled_indices.append(len(route_coords) - 1)
+        # 3. Project stations onto route segments to find closest point and distance
+        seg_start_lats = route_lats[:-1]
+        seg_start_lons = route_lons[:-1]
+        seg_end_lats = route_lats[1:]
+        seg_end_lons = route_lons[1:]
 
-        downsampled_lats = np.array(
-            [pt[0] for pt in downsampled_coords], dtype=np.float64
-        )
-        downsampled_lons = np.array(
-            [pt[1] for pt in downsampled_coords], dtype=np.float64
-        )
-
-        # 3. Vectorized distance calculation from stations to all downsampled route points
-        # Shape: (num_stations, num_downsampled_route_points)
-        # Using numpy broadcasting to compute pairwise distances
-        dists = cls.haversine_distance_vectorized(
-            station_lats[:, np.newaxis],
-            station_lons[:, np.newaxis],
-            downsampled_lats,
-            downsampled_lons,
-        )
-
-        # Find the index of the closest downsampled route point for each station
-        closest_downsampled_indices = np.argmin(dists, axis=1)
-        # Map back to original route indices
-        closest_indices = np.array(downsampled_indices)[closest_downsampled_indices]
-        # Get the actual distance to the closest route point in miles
-        min_dists = dists[np.arange(len(stations)), closest_downsampled_indices]
-        # Get the cumulative distance along the route at that closest point (projected mile marker)
-        station_cum_dists = route_cum_dists[closest_indices]
-
-        # 4. Filter stations within max_distance_miles and format output
         nearby_stations = []
+
         for idx, station in enumerate(stations):
-            dist_to_route = min_dists[idx]
-            if dist_to_route <= max_distance_miles:
+            s_lat = station_lats[idx]
+            s_lon = station_lons[idx]
+
+            # Vector from segment start to segment end: v = P_end - P_start
+            v_lat = seg_end_lats - seg_start_lats
+            v_lon = seg_end_lons - seg_start_lons
+
+            # Vector from segment start to station: w = S - P_start
+            w_lat = s_lat - seg_start_lats
+            w_lon = s_lon - seg_start_lons
+
+            # Dot product w . v
+            dot_wv = w_lat * v_lat + w_lon * v_lon
+            # Dot product v . v
+            dot_vv = v_lat * v_lat + v_lon * v_lon
+
+            # Projection factor t
+            t = np.zeros_like(dot_wv)
+            mask = dot_vv > 1e-12
+            t[mask] = dot_wv[mask] / dot_vv[mask]
+            t = np.clip(t, 0.0, 1.0)
+
+            # Projected coordinates on segments
+            proj_lats = seg_start_lats + t * v_lat
+            proj_lons = seg_start_lons + t * v_lon
+
+            # Compute distance from station to projected points on segments
+            dists_to_proj = cls.haversine_distance_vectorized(
+                s_lat, s_lon, proj_lats, proj_lons
+            )
+
+            # Find the segment that is closest to the station
+            best_seg_idx = np.argmin(dists_to_proj)
+            min_dist = dists_to_proj[best_seg_idx]
+
+            if min_dist <= max_distance_miles:
+                # Cumulative distance at segment start plus fraction t of segment distance
+                seg_len = seg_dists[best_seg_idx]
+                station_cum_dist = route_cum_dists[best_seg_idx] + t[best_seg_idx] * seg_len
+
                 nearby_stations.append(
                     {
                         "id": str(station.id),
@@ -130,10 +131,8 @@ class FuelService:
                         "price": float(station.retail_price),
                         "latitude": station.latitude,
                         "longitude": station.longitude,
-                        "dist_to_route": float(dist_to_route),
-                        "dist": float(
-                            station_cum_dists[idx]
-                        ),  # Cumulative distance (mile marker) along the route
+                        "dist_to_route": float(min_dist),
+                        "dist": float(station_cum_dist),
                     }
                 )
 

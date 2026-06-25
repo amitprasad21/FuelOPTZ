@@ -18,6 +18,11 @@ class FuelPrice(models.Model):
 
     class Meta:
         db_table = "fuel_prices"
+        indexes = [
+            models.Index(fields=["latitude", "longitude"], name="idx_fuel_prices_lat_lon"),
+            models.Index(fields=["state", "city"], name="idx_fuel_prices_state_city"),
+            models.Index(fields=["retail_price"], name="idx_fuel_prices_price"),
+        ]
 
     def __str__(self):
         return (

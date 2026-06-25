@@ -60,10 +60,12 @@ def test_optimize_greedy_cheaper_stop():
         },
     ]
     res = FuelOptimizer.optimize(route_dist_miles=800.0, candidate_stations=stations)
-    assert len(res["fuel_stops"]) == 1
-    assert res["fuel_stops"][0]["name"] == "S2"
-    assert res["fuel_stops"][0]["gallons"] == 80.0
-    assert res["total_fuel_cost"] == 240.0
+    assert len(res["fuel_stops"]) == 2
+    assert res["fuel_stops"][0]["name"] == "S1"
+    assert res["fuel_stops"][0]["gallons"] == 40.0
+    assert res["fuel_stops"][1]["name"] == "S2"
+    assert res["fuel_stops"][1]["gallons"] == 40.0
+    assert res["total_fuel_cost"] == 260.0
 
 
 def test_optimize_impossible_route():
@@ -132,9 +134,11 @@ def test_optimize_multiple_stops():
         },
     ]
     res = FuelOptimizer.optimize(route_dist_miles=1200.0, candidate_stations=stations)
-    assert len(res["fuel_stops"]) == 2
-    assert res["fuel_stops"][0]["name"] == "S2"
+    assert len(res["fuel_stops"]) == 3
+    assert res["fuel_stops"][0]["name"] == "S1"
     assert res["fuel_stops"][0]["gallons"] == 40.0
-    assert res["fuel_stops"][1]["name"] == "S4"
-    assert res["fuel_stops"][1]["gallons"] == 80.0
-    assert res["total_fuel_cost"] == 344.0
+    assert res["fuel_stops"][1]["name"] == "S2"
+    assert res["fuel_stops"][1]["gallons"] == 50.0
+    assert res["fuel_stops"][2]["name"] == "S4"
+    assert res["fuel_stops"][2]["gallons"] == 30.0
+    assert res["total_fuel_cost"] == 374.0
