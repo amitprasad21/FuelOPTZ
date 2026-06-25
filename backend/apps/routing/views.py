@@ -333,8 +333,8 @@ class RouteMapView(APIView):
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        document.getElementById("info-start").innerText = "{route.start_query}";
-        document.getElementById("info-dest").innerText = "{route.destination_query}";
+        document.getElementById("info-start").innerText = {json.dumps(route.start_query)};
+        document.getElementById("info-dest").innerText = {json.dumps(route.destination_query)};
 
         const map = L.map('map', {{
             zoomControl: false
