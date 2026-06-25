@@ -10,7 +10,6 @@ A production-quality REST API that calculates the optimal fuel stop locations an
 *   **PostgreSQL** (Hosted on Supabase)
 *   **Pandas & Numpy**: For high-performance offline database lookups, geocoding calculations, and spatial proximity filtering
 *   **Pytest**: Complete testing framework
-*   **Docker & Docker Compose**: Multi-container containerization
 *   **OpenRouteService API**: Route geometry and geocoding engine
 
 ---
@@ -96,9 +95,3 @@ See [docs/API.md](backend/docs/API.md) for full endpoint schemas and cURL exampl
 
 ---
 
-## Loom Recording Checklist
-Before submitting, record a short demo video showcasing:
-1.  **Overview**: Walk through the code layout, clean architecture folders (`apps/`, `sql/`, `optimization/`), and the optimization logic in `fuel_optimizer.py`.
-2.  **API Verification**: Use Postman to call `POST /api/v1/routes/optimize/` with "New York, NY" and "Los Angeles, CA". Highlight the returned total gallons, total cost, and list of recommended fuel stops.
-3.  **Cache Hit Verification**: Send the request again and show the response returning instantly (< 10ms) from the `RouteCache` database table.
-4.  **Test Suite Execution**: Run `pytest` on the terminal to show all tests passing.
