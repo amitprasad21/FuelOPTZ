@@ -22,5 +22,6 @@ COPY . /app/
 # Expose port
 EXPOSE 8000
 
-# Run migrations and start development server
-CMD ["sh", "-c", "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"]
+# Run migrations, import fuel prices, and start development server
+CMD ["sh", "-c", "python manage.py migrate && python manage.py import_fuel_prices && python manage.py runserver 0.0.0.0:8000"]
+

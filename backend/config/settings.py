@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import sys
 import urllib.parse
 from pathlib import Path
 from dotenv import load_dotenv
@@ -26,12 +27,14 @@ load_dotenv(BASE_DIR.parent / ".env")
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-z!dnsjvd3k*j-6&##84yxhp&i8yf%cdg+%h^e96ao)ub6rs*f7"
+SECRET_KEY = os.environ.get(
+    "SECRET_KEY", "django-insecure-z!dnsjvd3k*j-6&##84yxhp&i8yf%cdg+%h^e96ao)ub6rs*f7"
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DEBUG", "True").lower() == "true"
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
 
 # Application definition
@@ -83,27 +86,35 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 
 # Database
-# Parse DATABASE_URL from .env
-db_url = os.environ.get("DATABASE_URL")
-if db_url:
-    url = urllib.parse.urlparse(db_url)
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": url.path[1:],
-            "USER": url.username,
-            "PASSWORD": url.password,
-            "HOST": url.hostname,
-            "PORT": url.port,
-        }
-    }
-else:
+# Parse DATABASE_URL from .env or isolate to SQLite during tests
+if "test" in sys.argv:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
+            "NAME": BASE_DIR / "db_test.sqlite3",
         }
     }
+else:
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        url = urllib.parse.urlparse(db_url)
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": url.path[1:],
+                "USER": url.username,
+                "PASSWORD": url.password,
+                "HOST": url.hostname,
+                "PORT": url.port,
+            }
+        }
+    else:
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": BASE_DIR / "db.sqlite3",
+            }
+        }
 
 
 # Password validation

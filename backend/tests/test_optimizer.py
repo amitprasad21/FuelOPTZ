@@ -3,7 +3,7 @@ from apps.optimization.fuel_optimizer import FuelOptimizer
 
 
 def test_optimize_short_route_no_stops():
-    # If route distance is 300 miles (less than 500 miles range), no stops are needed
+    # Even if route distance is less than range, we must buy fuel to end with a full tank.
     stations = [
         {
             "name": "S1",
@@ -17,15 +17,16 @@ def test_optimize_short_route_no_stops():
         },
     ]
     res = FuelOptimizer.optimize(route_dist_miles=300.0, candidate_stations=stations)
-    assert len(res["fuel_stops"]) == 0
-    assert res["total_gallons"] == 0.0
-    assert res["total_fuel_cost"] == 0.0
+    assert len(res["fuel_stops"]) == 1
+    assert res["fuel_stops"][0]["name"] == "S1"
+    assert res["total_gallons"] == 30.0
+    assert res["total_fuel_cost"] == 90.0
 
 
 def test_optimize_greedy_cheaper_stop():
     # Route: 800 miles
     # Start: 0, S1: 300 (price 3.5), S2: 400 (price 3.0), S3: 600 (price 3.2)
-    # Optimal: drive to S2, buy 30 gallons to reach Destination (800) with 0 fuel
+    # Optimal: S2 is cheapest, buy all 80 gallons there (to end with full tank).
     stations = [
         {
             "name": "S1",
@@ -61,10 +62,8 @@ def test_optimize_greedy_cheaper_stop():
     res = FuelOptimizer.optimize(route_dist_miles=800.0, candidate_stations=stations)
     assert len(res["fuel_stops"]) == 1
     assert res["fuel_stops"][0]["name"] == "S2"
-    assert (
-        res["fuel_stops"][0]["gallons"] == 30.0
-    )  # (800 - 400)/10 - 10 remaining fuel = 30
-    assert res["total_fuel_cost"] == 90.0
+    assert res["fuel_stops"][0]["gallons"] == 80.0
+    assert res["total_fuel_cost"] == 240.0
 
 
 def test_optimize_impossible_route():
@@ -89,7 +88,7 @@ def test_optimize_impossible_route():
 def test_optimize_multiple_stops():
     # Route: 1200 miles
     # Start: 0, S1: 300 (price 3.5), S2: 400 (price 3.0), S3: 800 (price 3.2), S4: 900 (price 2.8)
-    # Expected: S2 (buy 40 gallons), S4 (buy 30 gallons) -> total cost = 120 + 84 = 204
+    # Expected: S2 (buy 40 gallons), S4 (buy 80 gallons) -> total cost = 120 + 224 = 344
     stations = [
         {
             "name": "S1",
@@ -137,5 +136,5 @@ def test_optimize_multiple_stops():
     assert res["fuel_stops"][0]["name"] == "S2"
     assert res["fuel_stops"][0]["gallons"] == 40.0
     assert res["fuel_stops"][1]["name"] == "S4"
-    assert res["fuel_stops"][1]["gallons"] == 30.0
-    assert res["total_fuel_cost"] == 204.0
+    assert res["fuel_stops"][1]["gallons"] == 80.0
+    assert res["total_fuel_cost"] == 344.0

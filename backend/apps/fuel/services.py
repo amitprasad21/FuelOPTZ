@@ -72,20 +72,45 @@ class FuelService:
         route_cum_dists = np.zeros(len(route_coords), dtype=np.float64)
         route_cum_dists[1:] = np.cumsum(seg_dists)
 
-        # 3. Vectorized distance calculation from stations to all route points
-        # Shape: (num_stations, num_route_points)
+        # 2b. Downsample route points for spatial distance matrix to keep it under ~2ms
+        downsampled_coords = [route_coords[0]]
+        downsampled_indices = [0]
+        for idx in range(1, len(route_coords) - 1):
+            pt = route_coords[idx]
+            last_pt = downsampled_coords[-1]
+            dist = cls.haversine_distance_vectorized(
+                last_pt[0], last_pt[1], pt[0], pt[1]
+            )
+            if dist >= 1.5:
+                downsampled_coords.append(pt)
+                downsampled_indices.append(idx)
+        if (len(route_coords) - 1) not in downsampled_indices:
+            downsampled_coords.append(route_coords[-1])
+            downsampled_indices.append(len(route_coords) - 1)
+
+        downsampled_lats = np.array(
+            [pt[0] for pt in downsampled_coords], dtype=np.float64
+        )
+        downsampled_lons = np.array(
+            [pt[1] for pt in downsampled_coords], dtype=np.float64
+        )
+
+        # 3. Vectorized distance calculation from stations to all downsampled route points
+        # Shape: (num_stations, num_downsampled_route_points)
         # Using numpy broadcasting to compute pairwise distances
         dists = cls.haversine_distance_vectorized(
             station_lats[:, np.newaxis],
             station_lons[:, np.newaxis],
-            route_lats,
-            route_lons,
+            downsampled_lats,
+            downsampled_lons,
         )
 
-        # Find the index of the closest route point for each station
-        closest_indices = np.argmin(dists, axis=1)
+        # Find the index of the closest downsampled route point for each station
+        closest_downsampled_indices = np.argmin(dists, axis=1)
+        # Map back to original route indices
+        closest_indices = np.array(downsampled_indices)[closest_downsampled_indices]
         # Get the actual distance to the closest route point in miles
-        min_dists = dists[np.arange(len(stations)), closest_indices]
+        min_dists = dists[np.arange(len(stations)), closest_downsampled_indices]
         # Get the cumulative distance along the route at that closest point (projected mile marker)
         station_cum_dists = route_cum_dists[closest_indices]
 

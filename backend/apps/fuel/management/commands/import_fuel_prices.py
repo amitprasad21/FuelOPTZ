@@ -2,6 +2,8 @@ import os
 import json
 import time
 import logging
+import csv
+import io
 import requests
 import pandas as pd
 from django.core.management.base import BaseCommand
@@ -16,7 +18,7 @@ CITIES_DB_URL = "https://raw.githubusercontent.com/kelvins/US-Cities-Database/ma
 
 
 class Command(BaseCommand):
-    help = "Imports fuel prices from a CSV file, geocodes locations, and performs deduplication and bulk inserts."
+    help = "Imports fuel prices from a CSV file, geocodes locations at address-level, and performs bulk inserts."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -32,12 +34,28 @@ class Command(BaseCommand):
             action="store_true",
             help="Forces re-downloading the cities database from GitHub.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Forces import even if database already contains fuel prices.",
+        )
 
     def handle(self, *args, **options):
         csv_path = options["csv_path"]
         force_download = options["force_download_cities"]
+        force_import = options["force"]
 
         t_start = time.time()
+
+        # 1. Skip logic if records exist
+        if FuelPrice.objects.exists() and not force_import:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "Fuel prices already imported in database. Skipping import (use --force to re-import)."
+                )
+            )
+            return
+
         self.stdout.write(
             self.style.NOTICE(f"Starting fuel price import from {csv_path}...")
         )
@@ -46,7 +64,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"CSV file not found at: {csv_path}"))
             return
 
-        # 1. Download/Load US Cities Coordinates DB
+        # 2. Download/Load US Cities Coordinates DB (for fallback)
         cities_csv_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "us_cities.csv"
         )
@@ -66,7 +84,6 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.ERROR(f"Failed to download cities database: {e}")
                 )
-                # Fallback if download fails and file doesn't exist
                 if not os.path.exists(cities_csv_path):
                     self.stdout.write(
                         self.style.ERROR("No local cities database available. Exiting.")
@@ -74,25 +91,48 @@ class Command(BaseCommand):
                     return
 
         df_cities = pd.read_csv(cities_csv_path)
-        # Standardize cities data
         df_cities["city_clean"] = df_cities["CITY"].astype(str).str.strip().str.upper()
         df_cities["state_clean"] = (
             df_cities["STATE_CODE"].astype(str).str.strip().str.upper()
         )
 
-        # Build local dictionary for fast O(1) coordinate lookups
         cities_coords = {}
         for _, row in df_cities.iterrows():
             key = (row["city_clean"], row["state_clean"])
             if key not in cities_coords:
                 cities_coords[key] = (float(row["LATITUDE"]), float(row["LONGITUDE"]))
 
-        # 2. Read and Clean Fuel Price CSV
+        # 3. Read and Clean Fuel Price CSV
         df_fuel = pd.read_csv(csv_path)
-        # Strip whitespace from headers
         df_fuel.columns = [col.strip() for col in df_fuel.columns]
 
-        # 3. Load Geocoding Cache to avoid repeat API hits
+        # 4. Filter out Canadian records (USA-only)
+        canada_provinces = {
+            "AB",
+            "ON",
+            "BC",
+            "MB",
+            "SK",
+            "QC",
+            "NB",
+            "NS",
+            "NL",
+            "PE",
+            "YT",
+            "NT",
+            "NU",
+        }
+        df_fuel = df_fuel[
+            ~df_fuel["State"].astype(str).str.strip().str.upper().isin(canada_provinces)
+        ]
+
+        # 5. Deduplicate In Memory (keep cheapest price per unique station ID)
+        df_fuel_sorted = df_fuel.sort_values(by="Retail Price", ascending=True)
+        df_fuel_clean = df_fuel_sorted.drop_duplicates(
+            subset=["OPIS Truckstop ID"], keep="first"
+        )
+
+        # 6. Load Geocoding Cache (for fallbacks)
         cache_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "geocoding_cache.json"
         )
@@ -106,7 +146,60 @@ class Command(BaseCommand):
                     self.style.WARNING(f"Could not load geocoding cache: {e}")
                 )
 
-        # Geocoding helper function (Nominatim / ORS)
+        # 7. U.S. Census batch geocoding (exact address-level coordinates)
+        self.stdout.write(
+            self.style.NOTICE("Batch geocoding USA stations via U.S. Census Bureau...")
+        )
+
+        csv_buffer = io.StringIO()
+        csv_writer = csv.writer(csv_buffer)
+        for _, row in df_fuel_clean.iterrows():
+            opis_id = int(row["OPIS Truckstop ID"])
+            address = str(row["Address"]).strip()
+            city = str(row["City"]).strip()
+            state = str(row["State"]).strip()
+            csv_writer.writerow([opis_id, address, city, state, ""])
+
+        csv_payload = csv_buffer.getvalue()
+        address_coords = {}
+
+        try:
+            url = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
+            payload = {"benchmark": "Public_AR_Current"}
+            files = {
+                "addressFile": ("batch.csv", io.BytesIO(csv_payload.encode("utf-8")))
+            }
+
+            r = requests.post(url, files=files, data=payload, timeout=120)
+            if r.status_code == 200:
+                response_buffer = io.StringIO(r.text)
+                reader = csv.reader(response_buffer)
+                match_count = 0
+                for row_data in reader:
+                    if len(row_data) >= 6 and row_data[2] == "Match":
+                        opis_id = int(row_data[0])
+                        lon_lat = row_data[5].split(",")
+                        if len(lon_lat) == 2:
+                            lon, lat = float(lon_lat[0]), float(lon_lat[1])
+                            address_coords[opis_id] = (lat, lon)
+                            match_count += 1
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"U.S. Census geocoder matched {match_count} / {len(df_fuel_clean)} addresses."
+                    )
+                )
+            else:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"U.S. Census batch geocoder returned status {r.status_code}."
+                    )
+                )
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"U.S. Census batch geocoding failed: {e}.")
+            )
+
+        # 8. Geocoding Cache/Online Fallback Helper for City-level
         ors_key = os.environ.get("ORS_API_KEY")
 
         def geocode_city_state(city, state):
@@ -117,13 +210,14 @@ class Command(BaseCommand):
             if cache_key in geo_cache:
                 return geo_cache[cache_key]
 
-            # Try OpenRouteService Geocoding if key is available
+            # ORS Geocoding with USA boundary limitation
             if ors_key:
                 try:
                     url = "https://api.openrouteservice.org/v1/geocode/search"
                     params = {
-                        "text": f"{city_clean}, {state_clean}, USA",
+                        "text": f"{city_clean}, {state_clean}",
                         "api_key": ors_key,
+                        "boundary.country": "USA",
                         "size": 1,
                     }
                     r = requests.get(url, params=params, timeout=10)
@@ -132,102 +226,65 @@ class Command(BaseCommand):
                         features = data.get("features", [])
                         if features:
                             coords = features[0]["geometry"]["coordinates"]
-                            # ORS returns [lon, lat]
                             lon, lat = float(coords[0]), float(coords[1])
                             geo_cache[cache_key] = (lat, lon)
-                            self.stdout.write(
-                                self.style.SUCCESS(
-                                    f"Geocoded via ORS: {cache_key} -> {lat}, {lon}"
-                                )
-                            )
                             return lat, lon
                 except Exception as ex:
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"ORS geocoding failed for {cache_key}: {ex}"
-                        )
-                    )
+                    logger.warning(f"ORS geocoding failed: {ex}")
 
-            # Fallback to Nominatim OpenStreetMap
+            # Nominatim geocoding with USA countrycodes limitation
             try:
                 headers = {"User-Agent": "FuelOPTZ-Importer/1.0 (antigravity@gemini)"}
                 url = "https://nominatim.openstreetmap.org/search"
                 params = {
                     "city": city_clean,
                     "state": state_clean,
-                    "country": "United States",
+                    "countrycodes": "us",
                     "format": "json",
                     "limit": 1,
                 }
-                # Also try without country if Canadian province (e.g. AB, ON)
-                if state_clean in [
-                    "AB",
-                    "ON",
-                    "BC",
-                    "MB",
-                    "SK",
-                    "QC",
-                    "NB",
-                    "NS",
-                    "NL",
-                    "PE",
-                    "YT",
-                    "NT",
-                    "NU",
-                ]:
-                    params["country"] = "Canada"
-
-                time.sleep(1.0)  # Nominatim policy requires max 1 req/sec
+                time.sleep(1.0)
                 r = requests.get(url, params=params, headers=headers, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
                     if data:
                         lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
                         geo_cache[cache_key] = (lat, lon)
-                        self.stdout.write(
-                            self.style.SUCCESS(
-                                f"Geocoded via Nominatim: {cache_key} -> {lat}, {lon}"
-                            )
-                        )
                         return lat, lon
             except Exception as ex:
-                self.stdout.write(
-                    self.style.WARNING(
-                        f"Nominatim geocoding failed for {cache_key}: {ex}"
-                    )
-                )
+                logger.warning(f"Nominatim geocoding failed: {ex}")
 
-            # Return None if both failed
             return None
 
-        # 4. Resolve Coordinates
-        self.stdout.write(self.style.NOTICE("Resolving fuel station coordinates..."))
+        # 9. Map remaining stations using offline cities database or geocoding fallbacks
+        self.stdout.write(
+            self.style.NOTICE("Resolving coordinates for unmatched stations...")
+        )
         resolved_count = 0
-        api_hit_count = 0
+        fallback_resolved = 0
         unresolved_count = 0
 
-        # We process unique city-state combinations to minimize lookups
-        unique_locations = df_fuel[["City", "State"]].drop_duplicates()
         location_coords = {}
+        unique_locs = df_fuel_clean[["City", "State"]].drop_duplicates()
 
-        for _, loc in unique_locations.iterrows():
+        for _, loc in unique_locs.iterrows():
             city = str(loc["City"]).strip()
             state = str(loc["State"]).strip()
             key_clean = (city.upper(), state.upper())
 
-            # Try offline database first
             if key_clean in cities_coords:
                 location_coords[(city, state)] = cities_coords[key_clean]
                 resolved_count += 1
             else:
-                # Try geocoding cache / API
                 coords = geocode_city_state(city, state)
                 if coords:
                     location_coords[(city, state)] = coords
-                    api_hit_count += 1
+                    fallback_resolved += 1
                 else:
                     unresolved_count += 1
-                    logger.warning(f"Unable to resolve coordinates for {city}, {state}")
+                    logger.warning(
+                        f"Unable to resolve coordinates for city fallback: {city}, {state}"
+                    )
 
         # Save geocoding cache back
         try:
@@ -238,14 +295,7 @@ class Command(BaseCommand):
                 self.style.WARNING(f"Could not save geocoding cache: {e}")
             )
 
-        # 5. Clean & Deduplicate Data in Memory
-        # Sort by Retail Price ascending, so that drop_duplicates will keep the CHEAPEST retail price for duplicates of the same OPIS Truckstop ID
-        df_fuel_sorted = df_fuel.sort_values(by="Retail Price", ascending=True)
-        df_fuel_clean = df_fuel_sorted.drop_duplicates(
-            subset=["OPIS Truckstop ID"], keep="first"
-        )
-
-        # 6. Prepare Model Instances
+        # 10. Prepare Model Instances
         fuel_price_instances = []
         for _, row in df_fuel_clean.iterrows():
             opis_id = int(row["OPIS Truckstop ID"])
@@ -256,9 +306,12 @@ class Command(BaseCommand):
             rack_id = int(row["Rack ID"]) if pd.notna(row["Rack ID"]) else None
             price = float(row["Retail Price"])
 
-            # Fetch coordinates
-            coords = location_coords.get((city, state))
-            lat, lon = (coords[0], coords[1]) if coords else (None, None)
+            # Hybrid resolution: exact address coordinates first, then fallback
+            if opis_id in address_coords:
+                lat, lon = address_coords[opis_id]
+            else:
+                coords = location_coords.get((city, state))
+                lat, lon = (coords[0], coords[1]) if coords else (None, None)
 
             fuel_price_instances.append(
                 FuelPrice(
@@ -274,7 +327,7 @@ class Command(BaseCommand):
                 )
             )
 
-        # 7. Bulk Upsert in Chunks
+        # 11. Bulk Upsert in Chunks
         chunk_size = 500
         total_created = 0
         self.stdout.write(
@@ -287,7 +340,6 @@ class Command(BaseCommand):
             with transaction.atomic():
                 for i in range(0, len(fuel_price_instances), chunk_size):
                     chunk = fuel_price_instances[i : i + chunk_size]
-                    # bulk_create performs upsert using PostgreSQL's ON CONFLICT
                     res = FuelPrice.objects.bulk_create(
                         chunk,
                         update_conflicts=True,
@@ -316,10 +368,11 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Import summary:\n"
-                f"- Total records in CSV: {len(df_fuel)}\n"
+                f"- Total USA records in CSV: {len(df_fuel)}\n"
                 f"- Deduplicated unique stations: {len(fuel_price_instances)}\n"
+                f"- Resolved via exact address (Census): {len(address_coords)}\n"
                 f"- Resolved via local database: {resolved_count}\n"
-                f"- Resolved via Geocoding API: {api_hit_count}\n"
+                f"- Resolved via geocoding API fallback: {fallback_resolved}\n"
                 f"- Unresolved locations: {unresolved_count}\n"
                 f"- Total time elapsed: {duration:.2f} seconds."
             )

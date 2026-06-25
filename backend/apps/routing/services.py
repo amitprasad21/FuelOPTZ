@@ -1,55 +1,207 @@
 import os
 import logging
 import requests
+import pandas as pd
 from apps.routing.models import RouteCache
 
 logger = logging.getLogger(__name__)
 
+_cities_cache = None
+
 
 class RoutingService:
+    @staticmethod
+    def is_in_us(lat: float, lon: float) -> bool:
+        """
+        Validates if coordinates are within USA bounding boxes.
+        Includes Mainland, Alaska, and Hawaii.
+        """
+        # Mainland: 24.396308 to 49.384358 lat, -125.0011 to -66.93457 lon
+        # Alaska: 51.214183 to 71.387687 lat, -179.148909 to -129.97951 lon
+        # Hawaii: 18.91619 to 28.402169 lat, -178.334698 to -154.806773 lon
+        if 24.0 <= lat <= 50.0 and -125.0 <= lon <= -66.0:
+            return True
+        if 51.0 <= lat <= 72.0 and -180.0 <= lon <= -129.0:
+            return True
+        if 18.0 <= lat <= 29.0 and -179.0 <= lon <= -154.0:
+            return True
+        return False
+
     @staticmethod
     def geocode_query(query: str) -> tuple[float, float]:
         """
         Geocodes a search string (e.g. 'New York, NY') to (latitude, longitude)
-        Tries OpenRouteService first, falls back to Nominatim.
+        Tries offline database lookup first, then OpenRouteService, and falls back to Nominatim.
         """
+        global _cities_cache
         query_clean = query.strip()
-        ors_key = os.environ.get("ORS_API_KEY")
+
+        # 0. Try offline cities database lookup
+        parts = [p.strip() for p in query_clean.split(",")]
+        if len(parts) == 2:
+            city, state = parts[0].upper(), parts[1].upper()
+            if _cities_cache is None:
+                try:
+                    base_dir = os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__))
+                    )
+                    csv_path = os.path.join(
+                        base_dir, "fuel", "management", "commands", "us_cities.csv"
+                    )
+                    if os.path.exists(csv_path):
+                        df = pd.read_csv(csv_path)
+                        cache = {}
+                        for _, row in df.iterrows():
+                            c_clean = str(row["CITY"]).strip().upper()
+                            s_clean = str(row["STATE_CODE"]).strip().upper()
+                            cache[(c_clean, s_clean)] = (
+                                float(row["LATITUDE"]),
+                                float(row["LONGITUDE"]),
+                            )
+                            if "STATE_NAME" in row:
+                                s_name = str(row["STATE_NAME"]).strip().upper()
+                                cache[(c_clean, s_name)] = (
+                                    float(row["LATITUDE"]),
+                                    float(row["LONGITUDE"]),
+                                )
+                        _cities_cache = cache
+                    else:
+                        _cities_cache = {}
+                except Exception as e:
+                    logger.warning(f"Failed to load offline cities database: {e}")
+                    _cities_cache = {}
+
+            coords = _cities_cache.get((city, state))
+            if coords:
+                lat, lon = coords
+                logger.info(f"Geocoded '{query}' offline to ({lat}, {lon})")
+                return lat, lon
 
         # 1. Try OpenRouteService Geocoding
+        ors_key = os.environ.get("ORS_API_KEY")
         if ors_key:
             try:
                 url = "https://api.openrouteservice.org/v1/geocode/search"
-                params = {"text": query_clean, "api_key": ors_key, "size": 1}
+                params = {
+                    "text": query_clean,
+                    "api_key": ors_key,
+                    "size": 1,
+                    "boundary.country": "USA",
+                }
                 r = requests.get(url, params=params, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
                     features = data.get("features", [])
                     if features:
                         coords = features[0]["geometry"]["coordinates"]
-                        # ORS returns [longitude, latitude]
                         lon, lat = float(coords[0]), float(coords[1])
+
+                        # Extra validation: check if the geocoder properties identify the country as USA
+                        props = features[0].get("properties", {})
+                        country = props.get("country", "").upper()
+                        country_code = props.get("country_a", "").upper()
+                        if (
+                            country
+                            and country
+                            not in ["UNITED STATES", "USA", "UNITED STATES OF AMERICA"]
+                        ) or (country_code and country_code not in ["US", "USA"]):
+                            raise ValueError(
+                                f"Location '{query}' is outside the United States."
+                            )
+
                         logger.info(f"Geocoded '{query}' via ORS to ({lat}, {lon})")
+                        if not RoutingService.is_in_us(lat, lon):
+                            raise ValueError(
+                                f"Location '{query}' is outside the United States."
+                            )
                         return lat, lon
             except Exception as e:
                 logger.warning(f"ORS Geocoding failed for '{query_clean}': {e}")
+                if "outside the United States" in str(e):
+                    raise
 
         # 2. Fallback to OpenStreetMap Nominatim
         try:
             url = "https://nominatim.openstreetmap.org/search"
             headers = {"User-Agent": "FuelOPTZ-Routing/1.0 (antigravity@gemini)"}
-            params = {"q": query_clean, "format": "json", "limit": 1}
+            params = {
+                "q": query_clean,
+                "format": "json",
+                "limit": 1,
+                "countrycodes": "us",
+            }
             r = requests.get(url, params=params, headers=headers, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 if data:
                     lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
+                    display_name = data[0].get("display_name", "")
+                    if (
+                        "United States" not in display_name
+                        and "USA" not in display_name
+                    ):
+                        if any(
+                            c in display_name
+                            for c in [", Canada", ", United Kingdom", ", Mexico"]
+                        ):
+                            raise ValueError(
+                                f"Location '{query}' is outside the United States."
+                            )
+
                     logger.info(f"Geocoded '{query}' via Nominatim to ({lat}, {lon})")
+                    if not RoutingService.is_in_us(lat, lon):
+                        raise ValueError(
+                            f"Location '{query}' is outside the United States."
+                        )
                     return lat, lon
         except Exception as e:
             logger.error(f"Nominatim Geocoding failed for '{query_clean}': {e}")
+            if "outside the United States" in str(e):
+                raise
 
         raise ValueError(f"Could not geocode location: '{query}'")
+
+    @staticmethod
+    def geocode_address(
+        address: str, city: str, state: str
+    ) -> tuple[float, float] | None:
+        """
+        Geocodes a street address on the fly using ORS or Nominatim.
+        """
+        query = f"{address}, {city}, {state}"
+        ors_key = os.environ.get("ORS_API_KEY")
+        if ors_key:
+            try:
+                url = "https://api.openrouteservice.org/v1/geocode/search"
+                params = {
+                    "text": query,
+                    "api_key": ors_key,
+                    "size": 1,
+                    "boundary.country": "USA",
+                }
+                r = requests.get(url, params=params, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    features = data.get("features", [])
+                    if features:
+                        coords = features[0]["geometry"]["coordinates"]
+                        return float(coords[1]), float(coords[0])
+            except Exception as e:
+                logger.warning(f"Failed to geocode address via ORS: {e}")
+
+        try:
+            url = "https://nominatim.openstreetmap.org/search"
+            headers = {"User-Agent": "FuelOPTZ-Routing/1.0 (antigravity@gemini)"}
+            params = {"q": query, "format": "json", "limit": 1, "countrycodes": "us"}
+            r = requests.get(url, params=params, headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data:
+                    return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as e:
+            logger.warning(f"Failed to geocode address via Nominatim: {e}")
+
+        return None
 
     @classmethod
     def get_route(cls, start_query: str, dest_query: str) -> RouteCache:

@@ -225,6 +225,49 @@ class FuelOptimizer:
                     current_idx = next_idx
 
         total_gallons = sum(p["gallons"] for p in purchases)
+
+        # Enforce that the tank must end at 50 gallons (refilled to full)
+        target_total = route_dist_miles / mpg
+        deficit = target_total - total_gallons
+
+        if deficit > 0 and candidate_stations:
+            # Find the cheapest station on the entire route to buy this deficit
+            cheapest_station = min(candidate_stations, key=lambda x: x["price"])
+
+            # Check if this station is already in purchases
+            existing_purchase = None
+            for p in purchases:
+                if (
+                    abs(p["dist"] - cheapest_station["dist"]) < 1e-3
+                    and p["name"] == cheapest_station["name"]
+                ):
+                    existing_purchase = p
+                    break
+
+            if existing_purchase:
+                existing_purchase["gallons"] += deficit
+                existing_purchase["cost"] = (
+                    existing_purchase["gallons"] * existing_purchase["price"]
+                )
+            else:
+                cost = deficit * cheapest_station["price"]
+                new_stop = {
+                    "name": cheapest_station["name"],
+                    "address": cheapest_station["address"],
+                    "city": cheapest_station["city"],
+                    "state": cheapest_station["state"],
+                    "price": cheapest_station["price"],
+                    "latitude": cheapest_station["latitude"],
+                    "longitude": cheapest_station["longitude"],
+                    "gallons": deficit,
+                    "cost": cost,
+                    "dist": cheapest_station["dist"],
+                }
+                purchases.append(new_stop)
+                purchases.sort(key=lambda x: x["dist"])
+
+        # Recompute totals after post-processing
+        total_gallons = sum(p["gallons"] for p in purchases)
         total_cost = sum(p["cost"] for p in purchases)
 
         return {

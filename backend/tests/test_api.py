@@ -61,10 +61,11 @@ def test_optimize_endpoint_validation_errors(api_client):
 
 
 @pytest.mark.django_db
+@patch("apps.routing.services.RoutingService.geocode_address")
 @patch("apps.routing.services.RoutingService.geocode_query")
 @patch("requests.post")
 def test_optimize_endpoint_success(
-    mock_post, mock_geocode, api_client, mock_fuel_stations
+    mock_post, mock_geocode, mock_geocode_address, api_client, mock_fuel_stations
 ):
     url = reverse("optimize_route")
 
@@ -75,6 +76,7 @@ def test_optimize_endpoint_success(
         (40.0, -83.0),  # Start coordinates
         (39.7, -86.1),  # Destination coordinates
     ]
+    mock_geocode_address.return_value = (39.7, -86.1)
 
     # Setup mock OpenRouteService Directions API response
     mock_response = {
@@ -103,10 +105,11 @@ def test_optimize_endpoint_success(
     assert r.status_code == status.HTTP_200_OK
     assert r.data["distance_miles"] == 180.0
     assert r.data["estimated_duration"] == 10800.0
-    assert (
-        r.data["total_gallons"] == 0.0
-    )  # distance is 180 miles < 500 range, no fuel stop needed
-    assert len(r.data["fuel_stops"]) == 0
+    assert r.data["total_gallons"] == 18.0  # (180 miles / 10 mpg) refilled to full
+    assert len(r.data["fuel_stops"]) == 1
+    assert r.data["fuel_stops"][0]["name"] == "MOCK STOP B"
+    assert r.data["total_fuel_cost"] == 45.0
+    assert "map_url" in r.data
     assert "route_geometry" in r.data
 
     # Verify Cache was created
@@ -123,3 +126,82 @@ def test_optimize_endpoint_success(
     assert r_cached.data["distance_miles"] == 180.0
     mock_geocode.assert_not_called()
     mock_post.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch("apps.routing.services.RoutingService.geocode_query")
+def test_optimize_endpoint_outside_usa(mock_geocode, api_client):
+    url = reverse("optimize_route")
+    # Ottawa, Canada is outside the USA
+    mock_geocode.side_effect = ValueError(
+        "Location 'Ottawa, ON' is outside the United States."
+    )
+
+    payload = {"start": "Ottawa, ON", "destination": "New York, NY"}
+    r = api_client.post(url, payload, format="json")
+    assert r.status_code == status.HTTP_400_BAD_REQUEST
+    assert "error" in r.data
+    assert "outside the United States" in r.data["error"]
+
+
+@pytest.mark.django_db
+@patch("apps.routing.services.RoutingService.geocode_address")
+@patch("apps.routing.services.RoutingService.geocode_query")
+@patch("requests.post")
+def test_map_view_success(
+    mock_post, mock_geocode, mock_geocode_address, api_client, mock_fuel_stations
+):
+    # Setup mock geocoding results
+    mock_geocode.side_effect = [
+        (40.0, -83.0),
+        (39.7, -86.1),
+    ]
+    mock_geocode_address.return_value = (39.7, -86.1)
+
+    # First cache the route by calling the optimize endpoint
+    route_url = reverse("optimize_route")
+    mock_response = {
+        "features": [
+            {
+                "properties": {
+                    "summary": {
+                        "distance": 180.0,
+                        "duration": 10800.0,
+                    }
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[-83.0, 40.0], [-86.1, 39.7]],
+                },
+            }
+        ]
+    }
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.json.return_value = mock_response
+
+    payload = {"start": "Columbus, OH", "destination": "Indianapolis, IN"}
+    api_client.post(route_url, payload, format="json")
+
+    # Now request the map view
+    map_url = reverse("route_map")
+    r = api_client.get(
+        map_url, {"start": "Columbus, OH", "destination": "Indianapolis, IN"}
+    )
+    assert r.status_code == 200
+    assert b"<!DOCTYPE html>" in r.content
+    assert b"FuelOPTZ" in r.content
+    assert b"L.map" in r.content
+
+
+def test_is_in_us_bounds():
+    from apps.routing.services import RoutingService
+
+    # Inside USA
+    assert RoutingService.is_in_us(40.0, -83.0) is True
+    assert RoutingService.is_in_us(39.7, -86.1) is True
+    assert RoutingService.is_in_us(61.2, -149.9) is True  # Alaska
+    assert RoutingService.is_in_us(21.3, -157.8) is True  # Hawaii
+
+    # Far Outside USA
+    assert RoutingService.is_in_us(51.5074, -0.1278) is False  # London, UK
+    assert RoutingService.is_in_us(-33.8688, 151.2093) is False  # Sydney, Australia
